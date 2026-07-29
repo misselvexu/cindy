@@ -101,13 +101,14 @@ describe('automation-generated sessions', () => {
   });
 
   it('keeps scheduler sessions in the desktop-visible source contract', () => {
-    // feishu / slack / telegram / discord 四个 IM 渠道均进 desktop sidebar
+    // feishu / slack / telegram / x / discord 五个 IM 渠道均进 desktop sidebar
     // (feishu 2026-07-16 起以「对话」分组回归, 见 sessionSource.ts 注释)。
     expect(DESKTOP_VISIBLE_SESSION_SOURCES).toEqual([
       'desktop',
       'feishu',
       'slack',
       'telegram',
+      'x',
       'discord',
       'wechat',
       'scheduler',
