@@ -3,7 +3,7 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "cindy-desktop-linux",
-  "documentNamespace": "https://cindy.app/spdx/desktop-linux/cb85667531389dc5500e06bc4aaa034f7a2ed9160fa4274e9843f3291755c614",
+  "documentNamespace": "https://cindy.app/spdx/desktop-linux/7d8d633b3324ac03c6accb3affd5ed335a9802fe4bbc747bc7ed50c0b9378467",
   "creationInfo": {
     "created": "2026-07-28T11:22:53Z",
     "creators": [
@@ -3627,6 +3627,23 @@
       ]
     },
     {
+      "name": "@wecom/aibot-node-sdk",
+      "SPDXID": "SPDXRef-Package-52dee735109446cd",
+      "versionInfo": "1.0.7",
+      "downloadLocation": "https://github.com/WecomTeam/aibot-node-sdk",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/%40wecom/aibot-node-sdk@1.0.7"
+        }
+      ]
+    },
+    {
       "name": "@xterm/addon-clipboard",
       "SPDXID": "SPDXRef-Package-8eaddaef2aabf7b6",
       "versionInfo": "0.1.0",
@@ -6292,6 +6309,23 @@
           "referenceCategory": "PACKAGE-MANAGER",
           "referenceType": "purl",
           "referenceLocator": "pkg:npm/etag@1.8.1"
+        }
+      ]
+    },
+    {
+      "name": "eventemitter3",
+      "SPDXID": "SPDXRef-Package-858b4b7f616d0453",
+      "versionInfo": "5.0.4",
+      "downloadLocation": "https://github.com/primus/eventemitter3",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/eventemitter3@5.0.4"
         }
       ]
     },
@@ -14513,6 +14547,11 @@
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-52dee735109446cd"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-8eaddaef2aabf7b6"
     },
     {
@@ -15294,6 +15333,11 @@
       "spdxElementId": "SPDXRef-DOCUMENT",
       "relationshipType": "DESCRIBES",
       "relatedSpdxElement": "SPDXRef-Package-51fac920df3d7558"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-858b4b7f616d0453"
     },
     {
       "spdxElementId": "SPDXRef-DOCUMENT",
