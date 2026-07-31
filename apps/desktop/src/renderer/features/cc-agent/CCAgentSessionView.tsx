@@ -2785,6 +2785,7 @@ export function CCAgentSessionView({
       messages={messages}
       taskUpdates={taskUpdates}
       isSessionStreaming={isStreaming}
+      continuationInFlightClientId={continuationInFlightClientId}
       onLoadMore={loadOlderMessages}
       isLoadingMore={isLoadingMore}
       hasMoreMessages={hasMoreMessages}
