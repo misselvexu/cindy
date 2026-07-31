@@ -15,6 +15,7 @@ import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import {
   gatewayLedgerCurrency,
   gatewayPricingCatalog,
+  declaredSingleGatewayCurrency,
   declaresGatewayTokenPrice,
   hasMixedGatewayCurrencies,
   getModelPriceQuote,
@@ -304,6 +305,10 @@ function broadcastPricing(pricing: ModelPricingCatalog | null): void {
  *         declaresGatewayTokenPrice 而不是 isPricedGatewayModel:后者对全 0 目录
  *         同样返回 false,会把「模型改成免费」误判成「服务端没下发价格」,于是对
  *         已经免费的模型继续按上一份付费报价计费最长 24 小时。
+ *   (a-3) 币种必须同源:新目录显式声明的币种与旧报价不一致时不启用(账号换了结算
+ *       币种,旧价不可信)。相应地 replaceGatewayModelPricing 在 retained 轮沿用
+ *       上一份账本币种 —— 无价响应常常省略可选的 currency 字段,若按构建区域重新
+ *       推导,账本币种会与 retained 金额分叉并被守卫整批丢弃,兜底白做。
  *   (b) 有最大年龄(RETAINED_PRICING_MAX_AGE_MS),且年龄以**最后一次真实报价**
  *       为准 —— 无价刷新不续期,否则连续无价会让陈旧价无限期进账本。
  *   (c) 绝不写入磁盘缓存。磁盘上永远只留本次真实结果或上一份精确快照:
@@ -329,6 +334,14 @@ function retainKnownGatewayQuotes(
   // (a-2) 目录下发了价格字段(含显式全 0 的免费声明)→ 这是有效价格,必须立刻生效。
   // 只有字段整体缺失才是「服务端没下发价格」那个故障态。
   if (models.some(declaresGatewayTokenPrice)) return null;
+  // (a-3) 新目录显式声明的币种与旧报价不一致 → 账号换了结算币种,旧报价不可信。
+  // 沿用会让 retained 金额与账本币种分叉,被守卫按异币种整批丢弃(等于兜底白做),
+  // 更糟的是按错币种记账。宁可回落无价。
+  const previousCurrency = gatewayLedgerCurrency(cache);
+  const declaredCurrency = declaredSingleGatewayCurrency(models);
+  if (declaredCurrency && previousCurrency && declaredCurrency !== previousCurrency) {
+    return null;
+  }
   // (b) 最后一次真实报价太久以前 → 不再沿用。此后回落无价:钱不再记(避免按早已
   // 调整过的价格持续累计错误金额),token 回退仍保证消息那一格有事实可看。
   if (
@@ -389,7 +402,15 @@ export function replaceGatewayModelPricing(
     lastPricedAt = cacheAt;
     lastPricedAtScope = scope;
   }
-  gatewayAccountCurrency = resolveGatewayAccountCurrency(models);
+  // retained 轮的账本币种必须与 retained 报价同源:无价响应常常连可选的 currency
+  // 字段一起省略,此时 resolveGatewayAccountCurrency 会按**构建区域**重新推导。若账号
+  // 结算币种本来就不等于构建区域(CN 构建 + USD 结算是正常组合),账本币种会被改成
+  // 区域币种,而 retained 金额仍是旧的账号币种 → 被账本守卫按异币种整批丢弃,兜底白做。
+  // 币种不一致的目录已在 retainKnownGatewayQuotes (a-3) 拒绝启用,所以走到这里的
+  // retained 一定与上一份币种同源。
+  gatewayAccountCurrency = retainedFromLastSnapshot
+    ? (gatewayLedgerCurrency(pricing) ?? resolveGatewayAccountCurrency(models))
+    : resolveGatewayAccountCurrency(models);
   gatewayAccountCurrencyScope = scope;
   // 账本写入层据此判断"这一笔是不是本账号的结算币种"。目录为空(登出 / clear)或混合
   // 币种时 resolveGatewayAccountCurrency 返回 null，账本随之回落构建默认值。

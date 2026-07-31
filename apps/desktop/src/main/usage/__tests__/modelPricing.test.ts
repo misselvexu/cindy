@@ -344,6 +344,44 @@ describe('gateway model pricing projection', () => {
     ).toEqual({});
   });
 
+  it('keeps the ledger currency aligned with retained quotes when the catalog omits currency', () => {
+    __resetActiveLedgerCurrencyForTesting();
+    // 账号结算币种刻意选成与构建区域不同的那个 —— CN 构建 + USD 结算是正常组合。
+    const accountCurrency = EXPECTED_GATEWAY_CURRENCY === 'USD' ? 'CNY' : 'USD';
+    replaceGatewayModelPricing([
+      {
+        id: 'aligned',
+        currency: accountCurrency,
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+    expect(currentLedgerCurrency()).toBe(accountCurrency);
+
+    // 无价响应通常连可选的 currency 字段一起省略。此时若按构建区域重新推导账本币种,
+    // retained 金额(旧账号币种)会被账本守卫按异币种整批丢弃 —— 兜底就白做了。
+    const retained = replaceGatewayModelPricing([{ id: 'aligned' }]);
+    expect(retained.xd?.aligned?.currency).toBe(accountCurrency);
+    expect(currentLedgerCurrency()).toBe(accountCurrency);
+  });
+
+  it('does not reuse retained quotes when the catalog switches currency', () => {
+    const first = EXPECTED_GATEWAY_CURRENCY === 'USD' ? 'CNY' : 'USD';
+    const second = first === 'USD' ? 'CNY' : 'USD';
+    replaceGatewayModelPricing([
+      {
+        id: 'switching',
+        currency: first,
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 账号换了结算币种(新目录显式声明另一种币种、但没带价格)→ 旧报价不可信,
+    // 沿用会按错币种记账。宁可回落无价。
+    expect(replaceGatewayModelPricing([{ id: 'switching', currency: second }])).toEqual({});
+  });
+
   it('stops reusing retained quotes once the last real pricing is too old', () => {
     const realAt = Date.parse('2026-07-30T10:00:00.000Z');
     vi.spyOn(Date, 'now').mockReturnValue(realAt);

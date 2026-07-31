@@ -87,6 +87,17 @@ export function hasMixedGatewayCurrencies(
 }
 
 /**
+ * 目录唯一的显式币种声明;未声明或混币时为 null(混币交由 hasMixedGatewayCurrencies
+ * 单独拒绝)。计费兜底据此校验「新目录的币种是否仍与旧报价一致」。
+ */
+export function declaredSingleGatewayCurrency(
+  models: readonly ModelAccessGatewayModel[],
+): MoneyCurrency | null {
+  const declared = declaredGatewayCurrencies(models);
+  return declared.size === 1 ? (declared.values().next().value ?? null) : null;
+}
+
+/**
  * @param fallbackCurrency 该模型未声明 currency 时的回落币种。调用方(gatewayPricingCatalog)
  *   会传同一目录里已声明的币种，让整份目录保持单一币种；缺省才按区域回落。
  */

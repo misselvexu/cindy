@@ -18,7 +18,10 @@ import {
   replaceGatewayModelPricing,
   trackGatewayModelPricingSync,
 } from '../usage/modelPricing.js';
-import { isPricedGatewayModel } from '../../shared/modelPriceQuote.js';
+import {
+  declaresGatewayTokenPrice,
+  isPricedGatewayModel,
+} from '../../shared/modelPriceQuote.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import {
   MODEL_ACCESS_STATUS_CHANNEL,
@@ -167,13 +170,17 @@ function applyGatewayModels(
     log.warn(
       `xd gateway pricing quotes cover ${quoteCount}/${pricedCount} priced models (${models.length} total)`,
     );
-  } else if (pricedCount === 0 && models.length > 0) {
+  } else if (models.length > 0 && !models.some(declaresGatewayTokenPrice)) {
     // 上面那条覆盖率告警的条件是 quoteCount < pricedCount,「整个目录一个价都没有」
     // 恰好是 0 < 0 → 不成立 → 全程静默。而这正是最该报的情形:计费链会整条归零
     // (2026-07-30 现场:67 个模型全部不带 inputCostPerToken,一整天没记一分钱,
     // 日志里一个字都没有)。分开一条日志,把「有几条旧报价被保留」也带上,现场可判。
+    //
+    // 判据与计费兜底同源(declaresGatewayTokenPrice):只报「价格字段整体缺失」这个
+    // 故障态。pricedCount === 0 会把显式全 0 的免费目录、只下发部分字段的目录一起
+    // 算进来 —— 那些是有效发布,报成计费故障是噪音。
     log.warn(
-      `xd gateway models carry no prices at all (${models.length} models); billing falls back to ${quoteCount} retained quote(s)`,
+      `xd gateway models carry no price fields at all (${models.length} models); billing falls back to ${quoteCount} retained quote(s)`,
     );
   }
   // dev:本地目录文件(catalog/providers.json)的 cindyModelMeta 段覆盖服务端下发的
