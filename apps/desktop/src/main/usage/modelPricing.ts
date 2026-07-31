@@ -15,7 +15,8 @@ import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import {
   gatewayLedgerCurrency,
   gatewayPricingCatalog,
-  isPricedGatewayModel,
+  declaresGatewayTokenPrice,
+  hasMixedGatewayCurrencies,
   getModelPriceQuote,
   subscriptionDirectPriceQuote,
 } from '../../shared/modelPriceQuote.js';
@@ -295,11 +296,14 @@ function broadcastPricing(pricing: ModelPricingCatalog | null): void {
  *
  * ── 不变量 ────────────────────────────────────────────────────────────────
  * retained 报价是**内存态的降级兜底**,三条边界共同约束它:
- *   (a) 只在目录本身可信、但确实一个 priced model 都没有时启用 —— 判据是
- *       pricedCount === 0,不是「投影为空」。混币目录(declared.size > 1)也会让
- *       gatewayPricingCatalog 返回 {},那是刻意的整份拒绝(见该函数注释:混币
- *       catalog 会被账本守卫按模型选择性丢弃,比整份没有报价更难发现),不能被
- *       本兜底绕过。
+ *   (a) 只在「目录可信 + 确实没下发任何价格字段」时启用。两个反例都必须排除:
+ *       · 混币目录(两种以上币种声明)—— gatewayPricingCatalog 对它也返回 {},
+ *         但那是刻意的整份拒绝(混币 catalog 会被账本守卫按模型选择性丢弃,比
+ *         整份没有报价更难发现),不能被本兜底绕过;
+ *       · 显式全 0 的免费目录 —— 它**下发了**价格,只是价为零。判据用
+ *         declaresGatewayTokenPrice 而不是 isPricedGatewayModel:后者对全 0 目录
+ *         同样返回 false,会把「模型改成免费」误判成「服务端没下发价格」,于是对
+ *         已经免费的模型继续按上一份付费报价计费最长 24 小时。
  *   (b) 有最大年龄(RETAINED_PRICING_MAX_AGE_MS),且年龄以**最后一次真实报价**
  *       为准 —— 无价刷新不续期,否则连续无价会让陈旧价无限期进账本。
  *   (c) 绝不写入磁盘缓存。磁盘上永远只留本次真实结果或上一份精确快照:
@@ -320,9 +324,11 @@ function retainKnownGatewayQuotes(
 ): ModelPricingCatalog | null {
   if (models.length === 0) return null;
   if (cacheScope !== scope) return null;
-  // (a) 目录里还有 priced model 却投影为空 → 不是「无价」,是目录本身被判不可信
-  // (当前唯一成因:混币)。此时必须维持整份拒绝。
-  if (models.some(isPricedGatewayModel)) return null;
+  // (a-1) 目录不可信(混币)→ 维持 gatewayPricingCatalog 的整份拒绝,不启用兜底。
+  if (hasMixedGatewayCurrencies(models)) return null;
+  // (a-2) 目录下发了价格字段(含显式全 0 的免费声明)→ 这是有效价格,必须立刻生效。
+  // 只有字段整体缺失才是「服务端没下发价格」那个故障态。
+  if (models.some(declaresGatewayTokenPrice)) return null;
   // (b) 最后一次真实报价太久以前 → 不再沿用。此后回落无价:钱不再记(避免按早已
   // 调整过的价格持续累计错误金额),token 回退仍保证消息那一格有事实可看。
   if (

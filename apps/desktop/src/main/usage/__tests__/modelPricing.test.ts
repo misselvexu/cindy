@@ -287,6 +287,63 @@ describe('gateway model pricing projection', () => {
     expect(mixed).toEqual({});
   });
 
+  it('never revives paid quotes for a catalog that explicitly prices everything at zero', async () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'was-paid',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 模型从付费调成免费:目录**下发了**价格,只是全为 0。这不是「服务端没下发价格」
+    // 那个故障态,兜底绝不能启用 —— 否则已经免费的模型还会按旧付费价继续计费。
+    const free = replaceGatewayModelPricing([
+      {
+        id: 'was-paid',
+        inputCostPerToken: 0,
+        outputCostPerToken: 0,
+        cacheReadInputTokenCost: 0,
+        cacheCreationInputTokenCost: 0,
+      },
+    ]);
+    expect(free).toEqual({});
+    expect(await getModelPricing()).toEqual({});
+  });
+
+  it('does not fall back when only some price fields are present', () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'partial',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 只下发 input 没下发 output:产不出报价,但目录确实带了价格字段 —— 属于
+    // 服务端形状变化而非「整体没下发」,同样不启用兜底(宁可不记,不要错记)。
+    expect(replaceGatewayModelPricing([{ id: 'partial', inputCostPerToken: 0.000004 }])).toEqual({});
+  });
+
+  it('does not fall back for a mixed-currency catalog even when it carries no prices', () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'model-a',
+        currency: 'USD',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 混币 + 无价:目录本身已不可信,兜底不得借「没下发价格」之名启用。
+    expect(
+      replaceGatewayModelPricing([
+        { id: 'model-a', currency: 'USD' },
+        { id: 'model-b', currency: 'CNY' },
+      ]),
+    ).toEqual({});
+  });
+
   it('stops reusing retained quotes once the last real pricing is too old', () => {
     const realAt = Date.parse('2026-07-30T10:00:00.000Z');
     vi.spyOn(Date, 'now').mockReturnValue(realAt);

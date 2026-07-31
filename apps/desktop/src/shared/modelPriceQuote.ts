@@ -48,6 +48,45 @@ export function isPricedGatewayModel(model: ModelAccessGatewayModel): boolean {
 }
 
 /**
+ * 该条目是否**下发了**标准 token 单价字段 —— 与 isPricedGatewayModel 不同:
+ * 显式为 0 是有效的「免费」声明(下发了,只是价为零),字段整体缺失才是服务端
+ * 没下发价格。两者在「全 0 目录」上分叉:isPricedGatewayModel 为 false(产不出
+ * 报价),本函数为 true(确实下发了)。
+ *
+ * 计费兜底必须用本函数判断故障态:模型从付费调成免费后,目录会下发一份全 0 的
+ * 有效价格,此时若按「产不出报价」判成故障并沿用上一份付费报价,就会对已经免费
+ * 的模型继续计费。
+ */
+export function declaresGatewayTokenPrice(model: ModelAccessGatewayModel): boolean {
+  return (
+    perMtok(model.inputCostPerToken) !== undefined ||
+    perMtok(model.outputCostPerToken) !== undefined ||
+    perMtok(model.cacheReadInputTokenCost) !== undefined ||
+    perMtok(model.cacheCreationInputTokenCost) !== undefined
+  );
+}
+
+function declaredGatewayCurrencies(
+  models: readonly ModelAccessGatewayModel[],
+): Set<MoneyCurrency> {
+  return new Set(
+    models
+      .map((model) => model.currency)
+      .filter((currency): currency is MoneyCurrency => currency === 'CNY' || currency === 'USD'),
+  );
+}
+
+/**
+ * 目录声明了两种以上币种 → 整份不可信。判据由本函数单一提供,gatewayPricingCatalog
+ * (整份拒绝)与计费兜底(拒绝启用)共用,避免两处各写一份后漂移。
+ */
+export function hasMixedGatewayCurrencies(
+  models: readonly ModelAccessGatewayModel[],
+): boolean {
+  return declaredGatewayCurrencies(models).size > 1;
+}
+
+/**
  * @param fallbackCurrency 该模型未声明 currency 时的回落币种。调用方(gatewayPricingCatalog)
  *   会传同一目录里已声明的币种，让整份目录保持单一币种；缺省才按区域回落。
  */
@@ -102,11 +141,7 @@ export function gatewayPricingCatalog(
   // 出现两种以上显式声明则整份拒绝:此时 resolveGatewayAccountCurrency 已判定该目录不可信
   // 并让账本回退构建币种，若这里继续产出混币 catalog，非账本币种的那部分模型会被守卫
   // 选择性丢弃 —— 形成"按模型漏记账"，比整份没有报价更难发现。
-  const declared = new Set(
-    models
-      .map((model) => model.currency)
-      .filter((currency): currency is MoneyCurrency => currency === 'CNY' || currency === 'USD'),
-  );
+  const declared = declaredGatewayCurrencies(models);
   if (declared.size > 1) return {};
   const fallbackCurrency = declared.values().next().value ?? gatewayCurrencyForRegion(region);
   const xd: Record<string, ModelPriceQuote> = {};
