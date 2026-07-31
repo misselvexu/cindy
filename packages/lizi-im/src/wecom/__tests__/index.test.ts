@@ -347,6 +347,29 @@ describe("WecomIM routing and ownership", () => {
     });
   });
 
+  it("preserves conflict status when the SDK follows a server kick with disconnected", async () => {
+    const { host } = createHost();
+    const client = new FakeClient();
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit("event.disconnected_event");
+    client.emit("disconnected", "another connection took over");
+
+    expect(im.getStatus()).toEqual({ kind: "conflict", appId: "bot-1" });
+  });
+
+  it("keeps ordinary disconnects in the reconnecting state", async () => {
+    const { host } = createHost();
+    const client = new FakeClient();
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit("disconnected", "network unavailable");
+
+    expect(im.getStatus()).toEqual({ kind: "connecting" });
+  });
+
   it.each([
     {
       channel: "wecomBot:set-config",

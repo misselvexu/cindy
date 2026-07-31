@@ -28,7 +28,7 @@ import {
   collectXdtFileLinks,
   collectXdtImageUrls,
   stripXdtFileLinks,
-  XDT_IMAGE_REGEX,
+  stripXdtImageLinks,
 } from "../xdtRefs.js";
 import {
   chunkWecomMarkdown,
@@ -361,7 +361,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     }
     for (const absPath of output.mediaAbsPaths ?? []) addAttachment(absPath);
 
-    const visibleText = stripXdtFileLinks(output.text.replace(XDT_IMAGE_REGEX, "")).trim();
+    const visibleText = stripXdtFileLinks(stripXdtImageLinks(output.text)).trim();
     const chunks = chunkWecomMarkdown(
       visibleText || (attachments.length > 0 ? "📎 附件如下" : "_(空回复)_"),
     );
@@ -398,9 +398,11 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       logger: createSdkLogger(this.log, botId, secret),
     });
     this.client = client;
+    let serverConflict = false;
 
     client.on("authenticated", () => {
       if (!this.isCurrent(client, generation)) return;
+      serverConflict = false;
       this.setStatus({ kind: "connected", appId: botId });
     });
     client.on("reconnecting", () => {
@@ -410,6 +412,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     client.on("disconnected", (reason) => {
       if (!this.isCurrent(client, generation)) return;
       this.log.warn("connection disconnected", sanitizeReason(reason));
+      if (serverConflict) return;
       this.setStatus({ kind: "connecting" });
     });
     client.on("error", (error) => {
@@ -429,6 +432,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     });
     client.on("event.disconnected_event", () => {
       if (!this.isCurrent(client, generation)) return;
+      serverConflict = true;
       this.setStatus({ kind: "conflict", appId: botId });
     });
     client.on("message.text", (frame) =>
