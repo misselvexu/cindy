@@ -506,7 +506,7 @@ export function schedulesDiffer(
     (schedule.preRunHook?.timeoutMs ?? undefined) !== (expected.preRunHook?.timeoutMs ?? undefined) ||
     schedule.notify.desktop !== expected.notify?.desktop ||
     schedule.notify.feishu !== expected.notify?.feishu ||
-    schedule.notify.wecomGroup !== expected.notify?.wecomGroup
+    !!schedule.notify.wecomGroup !== !!expected.notify?.wecomGroup
   );
 }
 
@@ -516,9 +516,13 @@ function normalizeNotify(
   return {
     desktop: notify?.desktop ?? true,
     feishu: notify?.feishu ?? false,
-    ...(notify?.wecomGroup === true ? { wecomGroup: true } : {}),
+    wecomGroup: notify?.wecomGroup ?? false,
   };
 }
+
+export const __testing = {
+  scheduleConfigToUpdateInput,
+};
 
 function sameWorkingDir(a: string | undefined, b: string): boolean {
   if (!a) return false;

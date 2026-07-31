@@ -199,10 +199,15 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
     if (!this.getState().enabled) {
       throw new Error('WECOM_GROUP_NOTIFICATIONS_DISABLED');
     }
+    const accountGeneration = captureImAccountGeneration();
+    if (accountGeneration === null) throw new ImAccountScopeClosedError();
+    const url = this.requireStoredUrl();
     return this.enqueue(async () => {
-      const url = this.requireStoredUrl();
       const chunks = splitUtf8(markdown.trim() || 'Cindy 通知');
       for (const chunk of chunks) {
+        if (!isImAccountGenerationCurrent(accountGeneration)) {
+          throw new ImAccountScopeClosedError();
+        }
         await this.send(url, chunk);
       }
     });

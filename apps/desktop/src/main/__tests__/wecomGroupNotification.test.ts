@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -21,6 +21,7 @@ vi.mock('../security/trustedAppRenderer', () => ({
 }));
 
 import { WecomGroupNotificationService, __testing } from '../wecomGroupNotification';
+import { activateImAccountBoundary, deactivateImAccountBoundary } from '../im/accountBoundary';
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -51,7 +52,10 @@ function createSecrets(initialUrl: string | null = null, initialEnabled: string 
 describe('WeCom group notification security boundary', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    activateImAccountBoundary();
   });
+
+  afterEach(() => activateImAccountBoundary());
 
   it('accepts only the official HTTPS webhook endpoint with one key parameter', () => {
     expect(() =>
@@ -214,6 +218,34 @@ describe('WeCom group notification security boundary', () => {
 
     expect(bodies[0]).toContain('first');
     expect(bodies[1]).toContain('second');
+  });
+
+  it('does not send a queued publish through a replacement account webhook', async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=account-one';
+    const secondUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=account-two';
+    const secrets = createSecrets(firstUrl);
+    const fetchImpl = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      return response({ errcode: 0 });
+    });
+    const service = new WecomGroupNotificationService(fetchImpl, secrets);
+
+    const first = service.publishMarkdown('first');
+    const second = service.publishMarkdown('second');
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+    deactivateImAccountBoundary();
+    secrets.write(WEBHOOK_SECRET_NAME, secondUrl);
+    activateImAccountBoundary();
+    releaseFirst?.();
+
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).rejects.toThrow('IM account changed');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl).toHaveBeenCalledWith(firstUrl, expect.any(Object));
   });
 
   it('clears both the webhook and its master switch', () => {
