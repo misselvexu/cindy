@@ -8,6 +8,7 @@ interface PendingInteraction {
 }
 
 const INTERACTION_TIMEOUT_MS = 10 * 60_000;
+const MAX_PERMISSION_INPUT_PREVIEW = 800;
 
 export class WecomTextInteractions {
   private readonly pending = new Map<string, PendingInteraction>();
@@ -38,7 +39,7 @@ export class WecomTextInteractions {
     this.pending.set(userId, { request, resolve: resolvePending, timer });
 
     try {
-      await this.im.sendText(userId, formatPrompt(request));
+      await this.im.sendText(userId, formatWecomInteractionPrompt(request));
     } catch (error) {
       const current = this.pending.get(userId);
       if (current?.request.requestId === request.requestId) {
@@ -80,9 +81,27 @@ export class WecomTextInteractions {
   }
 }
 
-function formatPrompt(request: InteractionRequest): string {
+function previewPermissionInput(input: Record<string, unknown>): string {
+  try {
+    const json = JSON.stringify(input, null, 2);
+    if (!json) return '<无法序列化>';
+    return json.length > MAX_PERMISSION_INPUT_PREVIEW
+      ? `${json.slice(0, MAX_PERMISSION_INPUT_PREVIEW)}\n…（已截断）`
+      : json;
+  } catch {
+    return '<无法序列化>';
+  }
+}
+
+export function formatWecomInteractionPrompt(request: InteractionRequest): string {
   if (request.kind === 'permission') {
     return `需要确认工具“${request.displayName ?? request.toolName}”。
+
+参数：
+\`\`\`json
+${previewPermissionInput(request.input)}
+\`\`\`
+
 回复“允许”执行一次，或回复“拒绝”取消本次操作。企业微信内不支持永久授权。`;
   }
   if (request.kind === 'plan_review') {
