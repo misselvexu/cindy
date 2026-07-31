@@ -32,6 +32,10 @@ __pycache__/
 out/
 .vite/
 apps/desktop/release/
+# 单测里 electron app.getPath 的 mock 失效时,userData 路径会退化成相对路径,把运行期
+# 缓存写进工作区。测试侧已在 afterEach flush 掉延迟写入(见 modelPricing.test.ts),
+# 这里再兜一道:这类产物绝不该进仓库。
+apps/desktop/cache/
 apps/desktop/resources/tools/
 # build-remote-bundles.mjs 会在 dev/package/build 前重新生成这些目录。
 apps/desktop/resources/cc-manager/

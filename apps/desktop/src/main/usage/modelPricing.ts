@@ -90,6 +90,19 @@ const RETAINED_PRICING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let unpricedFailureScope: string | null = null;
 
 /**
+ * 「最后已知报价」是否还能当降级计费基准 —— 年龄闸(不变量 b)的唯一实现。
+ *
+ * 与 asApproximateQuotes 一样,两条沿用路径(内存 retained、磁盘 hydrate 的故障态
+ * 投影)共用它。上一轮只把「标近似」收敛成一处、年龄闸却仍留在内存路径里,于是
+ * hydrate 分支绕过了 24h 限制:离线数天后开机、或无价故障期跨重启,陈旧价会继续
+ * 折算进 daily_spend / 会话总额;若之后 /models 一直拉不通(断网),更不会有新的
+ * sync 来重新评估,超龄价就长期充当计费基准。判据必须与「标近似」同处收敛。
+ */
+function isRetainablePricingAge(pricedAt: number): boolean {
+  return pricedAt > 0 && Date.now() - pricedAt <= RETAINED_PRICING_MAX_AGE_MS;
+}
+
+/**
  * 把精确报价投影成「按最后已知价折算」的工作副本。
  *
  * approximate 是下游唯一的降级信号源:computePriceQuoteTurnMoney 据此给
@@ -216,6 +229,31 @@ function validateCatalog(value: unknown): ModelPricingCatalog | null {
   return entries.length === 0 ? {} : null;
 }
 
+/**
+ * 磁盘写入串行链。写盘全是 fire-and-forget,连续两次 /models 同步(尤其无价轮现在
+ * 也要落币种)会让「读盘 → 决定保留与否 → 写盘」和另一次写入交错。串行化把这段
+ * 读-改-写变成不可分割的一步;文件本身的完整性另由 writeDiskCache 的原子 rename 保证。
+ */
+let diskWriteChain: Promise<void> = Promise.resolve();
+
+function enqueueDiskWrite(task: () => Promise<void>): void {
+  diskWriteChain = diskWriteChain.then(task, task).catch(() => {
+    /* 单次写盘失败已在 writeDiskCache 内部记日志,不能让链条断掉 */
+  });
+}
+
+/**
+ * 仅测试:等待排队中的写盘落地。
+ *
+ * 串行化把写盘推迟到了微任务队列之后,用例结束时可能还没执行完 —— 那时 electron
+ * app.getPath 的 mock 已被 restore,diskCachePath() 退化成相对路径,于是把缓存写进
+ * 了工作区(apps/desktop/cache/)。测试必须在 afterEach 里 flush 掉,否则既污染仓库
+ * 又让下一个用例读到上一个用例的残留。
+ */
+export async function __flushDiskWritesForTesting(): Promise<void> {
+  await diskWriteChain;
+}
+
 /** 读回同 scope 的磁盘快照(仅供写入前的报价保护使用;校验与 hydrate 同口径)。 */
 async function readValidDiskPayload(
   scope: string,
@@ -247,25 +285,39 @@ async function writeDiskCache(
 ): Promise<void> {
   try {
     const file = diskCachePath();
-    if (preserveDiskQuotes && (await readValidDiskPayload(scope))) {
-      // 磁盘上已有一份精确快照:整份原样留下,一个字段都不动。
-      //
-      // 曾经的写法是「取回磁盘的 pricing + fetchedAt,配上本次新推导的 accountCurrency」
-      // —— 那会把两个不同快照的字段拼在一起:无价响应省略 currency 时新币种按构建区域
-      // 推导,于是磁盘上出现「USD 报价 + CNY 账本币种」,下次 hydrate 恢复出自相矛盾的
-      // 状态,金额被账本守卫整批丢弃;还绕过了内存 retained 分支的币种一致校验 (a-3)。
-      // 报价、币种、年龄基准三者必须同源,所以要么整份换、要么整份留。
-      return;
+    let effectivePricing = pricing;
+    if (preserveDiskQuotes) {
+      if (await readValidDiskPayload(scope)) {
+        // 磁盘上已有一份精确快照:整份原样留下,一个字段都不动。
+        //
+        // 曾经的写法是「取回磁盘的 pricing + fetchedAt,配上本次新推导的 accountCurrency」
+        // —— 那会把两个不同快照的字段拼在一起:无价响应省略 currency 时新币种按构建区域
+        // 推导,于是磁盘上出现「USD 报价 + CNY 账本币种」,下次 hydrate 恢复出自相矛盾的
+        // 状态,金额被账本守卫整批丢弃;还绕过了内存 retained 分支的币种一致校验 (a-3)。
+        // 报价、币种、年龄基准三者必须同源,所以要么整份换、要么整份留。
+        return;
+      }
+      // 磁盘上还没有可用快照(首轮就无价、或上一份已失效)。此时仍要落盘 —— 账本币种
+      // 得能随快照恢复 —— 但**绝不能把降级报价写进去**:retained 是 approximate 的,
+      // 过不了 validateQuote,写了等于让下次 hydrate 把整份判无效,又回到「无价 = 全链
+      // 归零」。只落币种事实,报价留空。
+      effectivePricing = {};
     }
     await fs.mkdir(path.dirname(file), { recursive: true });
     const payload: DiskCachePayload = {
       version: DISK_CACHE_VERSION,
       scope,
       fetchedAt,
-      pricing,
+      pricing: effectivePricing,
       accountCurrency,
     };
-    await fs.writeFile(file, JSON.stringify(payload), 'utf8');
+    // 先写临时文件再 rename(同目录内原子):fs.writeFile 是「截断 + 逐块写」,两次写入
+    // 撞在一起会让读者看到半截 JSON —— hydrate 那边只能 catch 成缓存失效,冷启动又回到
+    // 没有报价。调用侧还额外串行化(enqueueDiskWrite),让 preserve 分支的「读盘 → 决定
+    // → 写盘」不被另一次写入插进来。
+    const tmp = `${file}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(payload), 'utf8');
+    await fs.rename(tmp, file);
   } catch (err) {
     log.debug(
       'write model pricing cache failed:',
@@ -299,17 +351,27 @@ async function hydrateFromDisk(scope: string): Promise<ModelPricingCatalog | nul
       if (currentScope() !== scope) return null;
       // 磁盘上存的一律是精确快照(validateQuote 要求 approximate === false),但如果本
       // scope 当前正处于「网关不下发价格」故障态,把它当**工作副本**用就等于「按最后
-      // 已知价折算」—— 必须与内存 retained 路径同款标近似,否则冷启动那一轮之后的计费
-      // 会以精确账单金额呈现(无 ~ 前缀、无来源说明)。磁盘本身不因此被改写。
-      const pricing =
-        unpricedFailureScope === scope ? asApproximateQuotes(precise) : precise;
+      // 已知价折算」—— 必须与内存 retained 路径同口径:既标近似(否则计费会以精确账单
+      // 金额呈现,无 ~ 前缀、无来源说明),也要过同一道年龄闸(否则离线数天后开机 /
+      // 故障期跨重启会拿陈旧价记账,而断网时不会再有 sync 来重新评估)。磁盘本身不改写。
+      //
+      // 非故障态(正常冷启动、/models 还没回来)照常恢复精确快照,不做年龄判断 ——
+      // 磁盘缓存本身没有 TTL 是本 PR 之前的既有行为,不在这里改口径。
+      const inUnpricedFailure = unpricedFailureScope === scope;
+      const pricing = inUnpricedFailure
+        ? isRetainablePricingAge(Number(raw.fetchedAt))
+          ? asApproximateQuotes(precise)
+          : {}
+        : precise;
       cache = pricing;
       cacheScope = scope;
       cacheAt = Number(raw.fetchedAt);
-      // 磁盘快照里只可能是真实报价(retained 轮不写盘、approximate 过不了 validateQuote),
-      // 所以它的 fetchedAt 就是「最后一次真实报价」的时刻 —— 用它播种年龄基准,让 retained
-      // 的最大年龄跨重启延续,而不是每次冷启动重新给陈旧价 24 小时。
-      if (pricing.xd) {
+      // 磁盘快照里只可能是真实报价(故障 / retained 轮整份保留、approximate 过不了
+      // validateQuote),所以它的 fetchedAt 就是「最后一次真实报价」的时刻 —— 用它播种
+      // 年龄基准,让最大年龄跨重启延续,而不是每次冷启动重新给陈旧价 24 小时。
+      // 按 precise 判断而不是投影后的 pricing:即便这份快照已超龄、本次不作为计费基准,
+      // 「最后一次真实报价发生在何时」仍是事实,后续 sync 的年龄闸要靠它做判断。
+      if (precise.xd) {
         lastPricedAt = Number(raw.fetchedAt);
         lastPricedAtScope = scope;
       }
@@ -410,11 +472,7 @@ function retainKnownGatewayQuotes(
   }
   // (b) 最后一次真实报价太久以前 → 不再沿用。此后回落无价:钱不再记(避免按早已
   // 调整过的价格持续累计错误金额),token 回退仍保证消息那一格有事实可看。
-  if (
-    lastPricedAtScope !== scope ||
-    lastPricedAt <= 0 ||
-    Date.now() - lastPricedAt > RETAINED_PRICING_MAX_AGE_MS
-  ) {
+  if (lastPricedAtScope !== scope || !isRetainablePricingAge(lastPricedAt)) {
     return null;
   }
   const previous = cache?.xd;
@@ -500,12 +558,14 @@ export function replaceGatewayModelPricing(
   if (!isUnpricedFailure) hydratedScopes.add(scope);
   // 写盘照常发生(accountCurrency 要能随快照恢复,与有没有报价无关),但故障轮与
   // retained 轮不得用自己的报价取代磁盘上那份 —— 由 preserveDiskQuotes 兜住。
-  void writeDiskCache(
-    scope,
-    pricing,
-    gatewayAccountCurrency,
-    cacheAt,
-    isUnpricedFailure || retainedFromLastSnapshot,
+  enqueueDiskWrite(() =>
+    writeDiskCache(
+      scope,
+      pricing,
+      gatewayAccountCurrency,
+      cacheAt,
+      isUnpricedFailure || retainedFromLastSnapshot,
+    ),
   );
   broadcastPricing(pricing);
   return pricing;

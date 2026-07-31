@@ -60,6 +60,7 @@ import {
   currentLedgerCurrency,
 } from '../ledgerCurrency';
 import {
+  __flushDiskWritesForTesting,
   __resetModelPricingCacheForTesting,
   clearGatewayModelPricing,
   getCodexSubscriptionValuePrice,
@@ -103,6 +104,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // 写盘是串行 + fire-and-forget 的,必须在 mock 被 restore 前 flush 干净:否则
+  // 排队中的写入会在 app.getPath mock 失效后执行,把缓存写进工作区
+  // (apps/desktop/cache/),既污染仓库又让下一个用例读到残留。
+  await __flushDiskWritesForTesting();
   vi.restoreAllMocks();
   if (tempUserDataDir) {
     await rm(tempUserDataDir, {
@@ -422,8 +427,9 @@ describe('gateway model pricing projection', () => {
     __resetModelPricingCacheForTesting();
     expect(replaceGatewayModelPricing([{ id: 'cold-start' }])).toEqual({});
 
-    // 这一轮绝不能覆盖磁盘上的精确快照。
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // 这一轮绝不能覆盖磁盘上的精确快照。断言「没被改写」收敛不到 waitFor 上
+    // (等不到变化),只能给足时间窗;慢 runner 上过短只会漏检、不会误报。
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const onDisk = JSON.parse(
       await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
     );
@@ -447,9 +453,6 @@ describe('gateway model pricing projection', () => {
     replaceGatewayModelPricing([
       { id: 'recovered', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
     ]);
-    await vi.waitFor(async () => {
-      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8');
-    });
 
     // 先进入故障态,再让目录恢复正常 —— 故障标记必须被清掉,
     // 否则之后从磁盘恢复的精确报价会被一直说成近似。
@@ -458,9 +461,109 @@ describe('gateway model pricing projection', () => {
       { id: 'recovered', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
     ]);
 
+    // 写盘是 fire-and-forget,必须等到**内容**落定再断言 —— 只等「文件存在」会在慢
+    // runner 上读到上一次写入的中间态甚至半截 JSON(CI 上就这样红过一次)。
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.pricing.xd.recovered.approximate).toBe(false);
+    });
+
     __resetModelPricingCacheForTesting();
     const hydrated = await getModelPricing();
     expect(hydrated?.xd?.recovered?.approximate).toBe(false);
+  });
+
+  it('never persists an approximate retained quote when the disk has no snapshot yet', async () => {
+    // 第一轮就有价 → 内存有精确报价;但让写盘还没落地时紧接着来一轮无价。
+    // preserveDiskQuotes 的「磁盘已有精确快照就整份保留」分支此时不成立,若继续把
+    // retained(approximate)报价写进磁盘,下次 hydrate 会因 validateQuote 整份判无效
+    // —— 又回到「无价 = 全链归零」。这一分支只允许落币种事实,报价必须留空。
+    replaceGatewayModelPricing([
+      { id: 'no-disk-yet', currency: 'USD', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+    const retained = replaceGatewayModelPricing([{ id: 'no-disk-yet' }]);
+    expect(retained.xd?.['no-disk-yet']?.approximate).toBe(true);
+
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      // 磁盘上要么是那份精确快照,要么是空报价 —— 绝不允许出现 approximate 报价。
+      const onDisk = raw.pricing?.xd?.['no-disk-yet'];
+      expect(onDisk === undefined || onDisk.approximate === false).toBe(true);
+      expect(raw.accountCurrency).toBe('USD');
+    });
+  });
+
+  it('keeps the disk cache parseable under back-to-back syncs', async () => {
+    // 写盘全是 fire-and-forget。连续多轮同步(有价 / 无价交替)若并发写同一文件,
+    // fs.writeFile 的「截断 + 逐块写」会让读者拿到半截 JSON —— hydrate 那边只能 catch
+    // 成缓存失效,冷启动又回到没有报价。串行链 + 原子 rename 必须让文件始终可解析。
+    for (let i = 0; i < 8; i += 1) {
+      replaceGatewayModelPricing([
+        {
+          id: 'churn',
+          currency: 'USD',
+          inputCostPerToken: 0.000003 + i * 1e-9,
+          outputCostPerToken: 0.000015,
+        },
+      ]);
+      replaceGatewayModelPricing([{ id: 'churn' }]);
+    }
+
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.scope).toBe(expectedScope());
+      expect(raw.accountCurrency).toBe('USD');
+    });
+
+    // 落盘内容必须能被 hydrate 接受(没有半截 JSON、也没有 approximate 报价)。
+    __resetModelPricingCacheForTesting();
+    const hydrated = await getModelPricing();
+    expect(hydrated).not.toBeNull();
+    for (const quote of Object.values(hydrated?.xd ?? {})) {
+      expect(quote.approximate).toBe(false);
+    }
+  });
+
+  it('refuses to bill from a disk snapshot that is already too old', async () => {
+    const realAt = Date.parse('2026-07-20T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(realAt);
+    replaceGatewayModelPricing([
+      { id: 'stale-disk', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.pricing.xd['stale-disk'].approximate).toBe(false);
+    });
+
+    // 离线数天后开机:磁盘快照已超龄,而冷启动第一条 /models 又是无价目录。
+    // 故障态下把这份陈旧快照当计费基准会绕过 24h 年龄闸 —— 断网时更不会有新的 sync
+    // 来重新评估,它会长期充当基准。年龄闸必须在 hydrate 这条路径上同样生效。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 30 * 3_600_000);
+    __resetModelPricingCacheForTesting();
+    expect(replaceGatewayModelPricing([{ id: 'stale-disk' }])).toEqual({});
+    await expect(getModelPricing()).resolves.toEqual({});
+  });
+
+  it('still uses a fresh disk snapshot as an approximate working copy', async () => {
+    const realAt = Date.parse('2026-07-20T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(realAt);
+    replaceGatewayModelPricing([
+      { id: 'fresh-disk', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.pricing.xd['fresh-disk'].approximate).toBe(false);
+    });
+
+    // 同样的冷启动顺序,但快照还在 24h 窗口内 → 照常沿用,并标近似。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 6 * 3_600_000);
+    __resetModelPricingCacheForTesting();
+    replaceGatewayModelPricing([{ id: 'fresh-disk' }]);
+    const hydrated = await getModelPricing();
+    expect(hydrated?.xd?.['fresh-disk']).toMatchObject({
+      inputPerMtok: 3,
+      approximate: true,
+    });
   });
 
   it('keeps the preserved disk snapshot internally consistent (quotes + currency + age)', async () => {
@@ -482,8 +585,11 @@ describe('gateway model pricing projection', () => {
     // 无价响应通常省略 currency。此前的写法会把「磁盘的 pricing + 本次按构建区域推导的
     // accountCurrency」拼在一起写盘,于是磁盘上出现「旧币种报价 + 新币种账本」这种自相
     // 矛盾的组合,下次 hydrate 出来的金额会被账本守卫整批丢弃。整份保留才对。
+    //
+    // 这类「证明什么都没发生」的断言收敛不到 waitFor 上(等不到变化),只能给足时间窗:
+    // 慢 runner 上 20ms 可能还没轮到那次错误写入,漏检而非误报 —— 留 150ms。
     replaceGatewayModelPricing([{ id: 'consistent' }]);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const after = JSON.parse(
       await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
     );
@@ -505,8 +611,9 @@ describe('gateway model pricing projection', () => {
 
     // retained 轮不得覆盖磁盘快照:approximate quote 过不了 validateQuote,写进去
     // 会让下次冷启动整份判无效 → 重启后回到「无价 = 全链归零」。
+    // 同上:断言「磁盘没被改写」无法用 waitFor 收敛,给足 150ms 时间窗。
     replaceGatewayModelPricing([{ id: 'precise' }]);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const afterRetained = JSON.parse(
       await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
     );
