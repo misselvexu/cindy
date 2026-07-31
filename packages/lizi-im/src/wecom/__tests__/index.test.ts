@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -246,6 +246,51 @@ describe("WecomIM routing and ownership", () => {
       msgtype: "markdown",
       markdown: { content: "late answer" },
     });
+  });
+
+  it("delivers terminal file and managed-image links without leaking local URLs", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const mediaDir = join(tmpdir(), `cindy-wecom-outbound-${randomUUID()}`);
+    const filePath = join(mediaDir, "report.txt");
+    const imagePath = join(mediaDir, "chart.png");
+    const imageUrl = "cindy-media://blobs/chart.png";
+    host.media = {
+      getCachedImage: async () => null,
+      cacheImage: async () => ({ absPath: imagePath, url: imageUrl }),
+      resolveMediaUrl: vi.fn((url) => (url === imageUrl ? imagePath : null)),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await mkdir(mediaDir, { recursive: true });
+    await Promise.all([
+      writeFile(filePath, "report"),
+      writeFile(imagePath, "image"),
+    ]);
+    try {
+      await im.init();
+      const fileUrl = `xdt-file:///${encodeURI(filePath.replaceAll("\\", "/"))}`;
+      await im.commitFinal({
+        userId: "owner",
+        text: `done\n[report.txt](${fileUrl})\n![chart](${imageUrl})`,
+        terminal: "done",
+        mediaAbsPaths: [imagePath],
+      });
+
+      expect(client.sendMessage).toHaveBeenCalledWith("owner", {
+        msgtype: "markdown",
+        markdown: { content: "done" },
+      });
+      expect(JSON.stringify(client.sendMessage.mock.calls)).not.toContain("xdt-file://");
+      expect(JSON.stringify(client.sendMessage.mock.calls)).not.toContain("cindy-media://");
+      expect(client.uploadMedia).toHaveBeenCalledTimes(2);
+      expect(client.sendMediaMessage).toHaveBeenCalledTimes(2);
+      expect(host.media.resolveMediaUrl).toHaveBeenCalledWith(imageUrl);
+    } finally {
+      await im.dispose();
+      await rm(mediaDir, { recursive: true, force: true });
+    }
   });
 
   it("deduplicates repeated callback message ids", async () => {

@@ -122,7 +122,9 @@ const host: IMHost = {
     },
     resolveMediaUrl: (url) => {
       try {
-        return url.startsWith('cindy-media://') ? resolveCindyMediaUrl(url).absPath : null;
+        return url.startsWith('cindy-media://') || url.startsWith('xdt-image://')
+          ? resolveManagedImageAbsPath(url)
+          : null;
       } catch {
         return null;
       }

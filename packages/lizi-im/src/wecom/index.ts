@@ -25,6 +25,12 @@ import type {
   SendFileResult,
 } from "../types.js";
 import {
+  collectXdtFileLinks,
+  collectXdtImageUrls,
+  stripXdtFileLinks,
+  XDT_IMAGE_REGEX,
+} from "../xdtRefs.js";
+import {
   chunkWecomMarkdown,
   decodeWecomLane,
   encodeWecomGroupLane,
@@ -332,10 +338,40 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   }
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
-    const chunks = chunkWecomMarkdown(output.text);
+    const fileLinks = collectXdtFileLinks(output.text);
+    const imageUrls = collectXdtImageUrls(output.text);
+    const attachments: Array<{ absPath: string; displayName?: string }> = [];
+    const seenPaths = new Set<string>();
+    const addAttachment = (absPath: string, displayName?: string) => {
+      if (seenPaths.has(absPath)) return;
+      seenPaths.add(absPath);
+      attachments.push({
+        absPath,
+        ...(displayName ? { displayName } : {}),
+      });
+    };
+    for (const link of fileLinks) addAttachment(link.absPath, link.alt || undefined);
+    for (const url of imageUrls) {
+      const absPath = this.host.media?.resolveMediaUrl(url) ?? null;
+      if (absPath) {
+        addAttachment(absPath);
+      } else {
+        this.log.warn("failed to resolve terminal managed image", { url });
+      }
+    }
+    for (const absPath of output.mediaAbsPaths ?? []) addAttachment(absPath);
+
+    const visibleText = stripXdtFileLinks(output.text.replace(XDT_IMAGE_REGEX, "")).trim();
+    const chunks = chunkWecomMarkdown(
+      visibleText || (attachments.length > 0 ? "📎 附件如下" : "_(空回复)_"),
+    );
     await this.sendFinalChunks(output.userId, chunks);
-    for (const absPath of output.mediaAbsPaths?.slice(0, 4) ?? []) {
-      const result = await this.sendFile(output.userId, absPath);
+    for (const attachment of attachments.slice(0, 4)) {
+      const result = await this.sendFile(
+        output.userId,
+        attachment.absPath,
+        attachment.displayName,
+      );
       if (!result.ok) {
         this.log.warn("failed to send terminal attachment", {
           reason: result.reason,

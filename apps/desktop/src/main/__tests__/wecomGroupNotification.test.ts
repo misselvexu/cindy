@@ -249,6 +249,26 @@ describe('WeCom group notification security boundary', () => {
     expect(bodies[1]).toContain('second');
   });
 
+  it('stops queued chunks after the master switch is disabled', async () => {
+    let releaseFirstChunk: (() => void) | undefined;
+    const fetchImpl = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseFirstChunk = resolve;
+      });
+      return response({ errcode: 0 });
+    });
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const service = new WecomGroupNotificationService(fetchImpl, createSecrets(url));
+
+    const publishing = service.publishMarkdown('a'.repeat(4_001));
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    service.setEnabled(false);
+    releaseFirstChunk?.();
+
+    await expect(publishing).rejects.toThrow('WECOM_GROUP_NOTIFICATIONS_DISABLED');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it('does not send a queued publish through a replacement account webhook', async () => {
     let releaseFirst: (() => void) | undefined;
     const firstUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=account-one';
