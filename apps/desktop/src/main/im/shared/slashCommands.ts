@@ -11,7 +11,6 @@
  * detach source 标记为 `${channel}-slash`。
  */
 
-import { getMaker } from '../../maker-host';
 import { getDesktopProviderService } from '../../maker-host/createDesktopProviderService';
 import { getModelVisibilityOverride } from '../../maker-host/model-visibility-mirror';
 import { getSessionProvider } from '../../maker-host/session-provider-store';
@@ -37,6 +36,12 @@ import { enterControl } from './controlState';
 import { bindingStore, executeDetach } from '../binding';
 import type { IdentityKey } from '@cindy/im';
 import type { ImChannelAdapter } from './types';
+import {
+  permissionModeCommandContext,
+  renderTextPermissionModePicker,
+  renderTextPermissionModeResult,
+  resolvePermissionMode,
+} from './permissionModeControl';
 
 /** Quick text-only check; treat anything starting with '/' (no spaces before) as a command. */
 export function looksLikeSlashCommand(text: string): boolean {
@@ -85,7 +90,7 @@ export function createSlashHandlers(
   }
 
   async function handleSlashCommand(text: string, ctx: SlashCtx): Promise<boolean> {
-    const [cmd] = text.trim().split(/\s+/);
+    const [cmd, ...commandArgs] = text.trim().split(/\s+/);
     log.info(`slash cmd=${cmd} userId=...${ctx.userId.slice(-8)}`);
 
     switch (cmd) {
@@ -380,10 +385,6 @@ export function createSlashHandlers(
       }
 
       case '/permission': {
-        if (!richIm) {
-          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
-          return true;
-        }
         if (threadScoped && threadUi) {
           await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported);
           return true;
@@ -394,12 +395,36 @@ export function createSlashHandlers(
           return true;
         }
         const { row } = target;
-        const maker = getMaker();
-        const modes = maker.getCapabilities(row.agentKind).permissionModes;
+        const context = permissionModeCommandContext(
+          row.id,
+          row.permissionMode,
+          turnRunner.getPermissionModes(row.agentKind),
+        );
+        if (!richIm) {
+          const requested = commandArgs[0];
+          if (!requested) {
+            await safeSendText(ctx.userId, renderTextPermissionModePicker(ui, context));
+            return true;
+          }
+          const mode = resolvePermissionMode(context.modes, requested);
+          if (!mode) {
+            await safeSendText(ctx.userId, renderTextPermissionModePicker(ui, context));
+            return true;
+          }
+          const confirmedFullAccess = ['confirm', '确认'].includes(commandArgs[1]?.toLowerCase());
+          const result = await turnRunner.changePermissionMode({
+            sessionId: row.id,
+            mode: mode.id,
+            modes: context.modes,
+            confirmedFullAccess,
+          });
+          await safeSendText(ctx.userId, renderTextPermissionModeResult(ui, result));
+          return true;
+        }
         const spec = cards.buildPermissionModePickerCard({
           sessionId: row.id,
           agentKind: row.agentKind,
-          modes,
+          modes: context.modes,
           currentMode: row.permissionMode,
         });
         try {

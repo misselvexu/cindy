@@ -56,8 +56,11 @@ import { isTerminalAgentErrorEvent } from '@cindy/maker-core';
 import type {
   AgentEvent,
   AgentKind,
+  Capabilities,
   InteractionDecision,
   InteractionRequest,
+  PermissionMode,
+  PermissionModeDescriptor,
   Session as MakerSession,
   TurnPermissionPolicy,
   UserMessage,
@@ -108,12 +111,18 @@ import {
 import { overloadRetryNotice, terminalErrorText } from './turnRetryNotice';
 import {
   toCoreAgentKind,
+  readPermissionMode,
   touchUserSent as repoTouchUserSent,
+  updatePermissionMode,
   type ImSessionRepo,
   type ImSessionRow,
 } from './sessionRepo';
 import type { ImCardBuilders } from './cardBuilders';
 import type { ImChannelAdapter } from './types';
+import {
+  changeSessionPermissionMode,
+  type PermissionModeChangeResult,
+} from './permissionModeControl';
 
 const PRE_DISPATCH_ACK_CLEANUP_TIMEOUT_MS = 1500;
 /** SESSION_RUNNING 竞态 / desktop turn 仍在跑时的兜底重试间隔。 */
@@ -304,6 +313,11 @@ export interface ImRunAgentTurnArgs {
   trackBackgroundTask?: (operation: () => Promise<void>) => void;
   /** Optional per-turn host policy (personal WeChat routes confirmations to Desktop). */
   turnPermissionPolicy?: TurnPermissionPolicy;
+  /** Resolve a channel safety policy after the concrete session route is known. */
+  turnPermissionPolicyForRoute?(
+    row: ImSessionRow,
+    capabilities: Capabilities,
+  ): TurnPermissionPolicy | undefined;
 }
 
 export interface ImTurnTerminal {
@@ -354,6 +368,14 @@ export interface ImTurnRunner {
   disposeOneSession(sessionId: string): Promise<void>;
   /** Get the live Maker Session for a given DB session id, or null. */
   getMakerSessionById(sessionId: string): MakerSession | null;
+  /** Permission choices exposed by the session's concrete Agent implementation. */
+  getPermissionModes(agentKind: AgentKind): PermissionModeDescriptor[];
+  changePermissionMode(args: {
+    sessionId: string;
+    mode: PermissionMode;
+    modes: readonly PermissionModeDescriptor[];
+    confirmedFullAccess?: boolean;
+  }): Promise<PermissionModeChangeResult>;
   /**
    * `!stop` 控制指令入口: 中止该路由 (bot, user[, scopeKey]) 对应 session 上
    * 正在跑的 turn, 并丢弃 sendQueue 里尚未派发的排队消息 — 不清队的话, abort
@@ -695,6 +717,11 @@ export function createTurnRunner(
       startBackgroundTask(() => maybeGenerateImSessionTitle(row.id, text, threadHeaderCardId));
     }
 
+    const turnPermissionPolicy =
+      args.turnPermissionPolicyForRoute?.(
+        row,
+        getMaker().getCapabilities(row.agentKind),
+      ) ?? args.turnPermissionPolicy;
     const item: QueuedSend = {
       turn,
       userMessage: buildImUserMessage(args.agentText ?? text, attachments, target.attached),
@@ -704,7 +731,7 @@ export function createTurnRunner(
       notified: false,
       queueMode: args.queueMode,
       ...(args.beforeProviderStart ? { beforeProviderStart: args.beforeProviderStart } : {}),
-      ...(args.turnPermissionPolicy ? { turnPermissionPolicy: args.turnPermissionPolicy } : {}),
+      ...(turnPermissionPolicy ? { turnPermissionPolicy } : {}),
     };
 
     // turn 进行中(本 session 的本渠道 turn 未收口 / sendQueue 已有人排队 /
@@ -2795,6 +2822,14 @@ export function createTurnRunner(
     disposeAllSessions,
     disposeOneSession,
     getMakerSessionById,
+    getPermissionModes: (agentKind) => getMaker().getCapabilities(agentKind).permissionModes,
+    changePermissionMode: (args) =>
+      changeSessionPermissionMode({
+        ...args,
+        readPreviousMode: () => readPermissionMode(args.sessionId),
+        getLiveSession: () => getMakerSessionById(args.sessionId),
+        persist: (mode) => updatePermissionMode(args.sessionId, mode),
+      }),
     stopActiveTurn,
   };
 }

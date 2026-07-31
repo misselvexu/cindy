@@ -17,7 +17,6 @@ import { useTranslation } from 'react-i18next';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
 import { ModelSelector } from '@/components/new-chat/ModelSelector';
-import { PermissionSelector } from '@/components/new-chat/PermissionSelector';
 import { type ModelDescriptor, useAgentCapabilities } from '@/hooks/useAgentCapabilities';
 import { useProviders } from '@/hooks/useProviders';
 import { deriveModelsFromProviders } from '@/lib/providerModels';
@@ -33,8 +32,6 @@ import {
   type ImDefaultSettingsPatch,
   type ImDefaultSettingsState,
   isImDefaultEffort,
-  isImDefaultPermissionMode,
-  isRemoteImUnsupportedPermissionMode,
 } from '../../../shared/imDefaultSettings';
 import { DefaultOverrideControls } from './DefaultOverrideControls';
 import { buildAgentSettingsPatch, mergeSettingsPatch } from './imDefaultSettingsLogic';
@@ -66,8 +63,6 @@ export function ImDefaultSettingsSection({
   onSummaryChange?: (summary: ImDefaultSettingsSummary | null) => void;
 }) {
   const { t } = useTranslation();
-  const remotePermissionKey =
-    channel === 'wechat' ? 'settings.wechatBot.permission' : 'settings.imBot.remotePermission';
   const { providers } = useProviders();
   const cc = useAgentCapabilities('claude-code');
   const codex = useAgentCapabilities('codex');
@@ -233,17 +228,6 @@ export function ImDefaultSettingsSection({
     );
   };
 
-  const changePermissionMode = (permissionMode: string) => {
-    if (
-      !isImDefaultPermissionMode(permissionMode) ||
-      isRemoteImUnsupportedPermissionMode(channel, permissionMode) ||
-      permissionMode === settings.permissionMode
-    ) {
-      return;
-    }
-    void persist({ permissionMode });
-  };
-
   return (
     <section
       className={cn(
@@ -336,29 +320,6 @@ export function ImDefaultSettingsSection({
           />
         </div>
       </div>
-
-      {(channel === 'wechat' || channel === 'wecom') && (
-        <div className="flex flex-col gap-2">
-          <span className="text-[12px] font-medium text-[var(--text-secondary)]">
-            {t(`${remotePermissionKey}.label`)}
-          </span>
-          <PermissionSelector
-            permissionMode={settings.permissionMode}
-            onPermissionModeChange={changePermissionMode}
-            vendorKey={vendorKeyFor(settings.agentKind)}
-            disabled={pending}
-            triggerVariant="field"
-            ariaContext={t(`${remotePermissionKey}.label`)}
-            disabledModes={{
-              bypassPermissions: t(`${remotePermissionKey}.fullAccessDisabled`),
-              acceptEdits: t(`${remotePermissionKey}.permissionModeDisabled`),
-            }}
-          />
-          <p className="text-[12px] leading-[1.5] text-[var(--settings-section-desc)]">
-            {t(`${remotePermissionKey}.hint`)}
-          </p>
-        </div>
-      )}
     </section>
   );
 }

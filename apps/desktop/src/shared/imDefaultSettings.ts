@@ -85,16 +85,6 @@ const PERMISSION_MODES = new Set<ImDefaultPermissionMode>([
   'bypassPermissions',
 ]);
 
-export const WECHAT_UNSUPPORTED_PERMISSION_MODES: readonly ImDefaultPermissionMode[] = [
-  'acceptEdits',
-  'bypassPermissions',
-];
-
-export const REMOTE_IM_RESTRICTED_CHANNELS: readonly ImDefaultSettingsChannel[] = [
-  'wechat',
-  'wecom',
-];
-
 export function isImDefaultAgentKind(value: unknown): value is ImDefaultAgentKind {
   return typeof value === 'string' && AGENT_KINDS.has(value as ImDefaultAgentKind);
 }
@@ -105,23 +95,6 @@ export function isImDefaultEffort(value: unknown): value is ImDefaultEffort {
 
 export function isImDefaultPermissionMode(value: unknown): value is ImDefaultPermissionMode {
   return typeof value === 'string' && PERMISSION_MODES.has(value as ImDefaultPermissionMode);
-}
-
-export function isWechatUnsupportedPermissionMode(
-  value: unknown,
-): value is ImDefaultPermissionMode {
-  return isImDefaultPermissionMode(value) && WECHAT_UNSUPPORTED_PERMISSION_MODES.includes(value);
-}
-
-export function isRemoteImUnsupportedPermissionMode(
-  channel: ImDefaultSettingsChannel | undefined,
-  value: unknown,
-): value is ImDefaultPermissionMode {
-  return (
-    channel !== undefined &&
-    REMOTE_IM_RESTRICTED_CHANNELS.includes(channel) &&
-    isWechatUnsupportedPermissionMode(value)
-  );
 }
 
 export function isImDefaultSettingsChannel(value: unknown): value is ImDefaultSettingsChannel {

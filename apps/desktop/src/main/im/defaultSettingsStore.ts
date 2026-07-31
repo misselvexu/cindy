@@ -20,7 +20,6 @@ import {
   isImDefaultAgentKind,
   isImDefaultEffort,
   isImDefaultPermissionMode,
-  isRemoteImUnsupportedPermissionMode,
 } from '../../shared/imDefaultSettings.js';
 import { desktopMakerLogger } from '../maker-host/logger-adapter.js';
 import {
@@ -76,18 +75,8 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
   };
 }
 
-function normalizeChannelSettings(
-  channel: ImDefaultSettingsChannel,
-  raw: unknown,
-): ImDefaultSettings {
-  const settings = normalizeSettings(raw);
-  if (!isRemoteImUnsupportedPermissionMode(channel, settings.permissionMode)) {
-    return settings;
-  }
-  return {
-    ...settings,
-    permissionMode: IM_DEFAULT_SETTINGS.permissionMode,
-  };
+function normalizeChannelSettings(raw: unknown): ImDefaultSettings {
+  return normalizeSettings(raw);
 }
 
 function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
@@ -138,7 +127,7 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
       channels: Object.fromEntries(
         IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
           channel,
-          normalizeChannelSettings(channel, legacy),
+          normalizeChannelSettings(legacy),
         ]),
       ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
     };
@@ -151,7 +140,7 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
     channels: Object.fromEntries(
       IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
         channel,
-        normalizeChannelSettings(channel, rawChannels[channel]),
+        normalizeChannelSettings(rawChannels[channel]),
       ]),
     ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
   };
@@ -236,13 +225,6 @@ export function writeImDefaultSettingsPatch(
   patch: ImDefaultSettingsPatch,
   channel?: ImDefaultSettingsChannel,
 ): OverrideSettingsState<ImDefaultSettings> {
-  if (isRemoteImUnsupportedPermissionMode(channel, patch.permissionMode)) {
-    throw new Error(
-      channel === 'wechat'
-        ? 'WECHAT_PERMISSION_MODE_UNSUPPORTED'
-        : 'WECOM_PERMISSION_MODE_UNSUPPORTED',
-    );
-  }
   const document = store.read();
   const current = channel ? document.channels[channel] : document.global;
   const next = mergeSettingsPatch(current, patch);

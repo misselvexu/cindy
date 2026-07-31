@@ -200,7 +200,7 @@ describe('im default settings store', () => {
   });
 
   it.each(['acceptEdits', 'bypassPermissions'] as const)(
-    'clamps legacy and persisted restricted-channel %s permission defaults',
+    'preserves legacy and persisted channel %s permission defaults',
     (permissionMode) => {
       const migrated = __testing.normalizeDocument({
         ...IM_DEFAULT_SETTINGS,
@@ -209,8 +209,8 @@ describe('im default settings store', () => {
 
       expect(migrated.global.permissionMode).toBe(permissionMode);
       expect(migrated.channels.feishu.permissionMode).toBe(permissionMode);
-      expect(migrated.channels.wechat.permissionMode).toBe('auto');
-      expect(migrated.channels.wecom.permissionMode).toBe('auto');
+      expect(migrated.channels.wechat.permissionMode).toBe(permissionMode);
+      expect(migrated.channels.wecom.permissionMode).toBe(permissionMode);
 
       const persisted = __testing.normalizeDocument({
         schemaVersion: 3,
@@ -220,8 +220,8 @@ describe('im default settings store', () => {
           wecom: { ...IM_DEFAULT_SETTINGS, permissionMode },
         },
       });
-      expect(persisted.channels.wechat.permissionMode).toBe('auto');
-      expect(persisted.channels.wecom.permissionMode).toBe('auto');
+      expect(persisted.channels.wechat.permissionMode).toBe(permissionMode);
+      expect(persisted.channels.wecom.permissionMode).toBe(permissionMode);
     },
   );
 
@@ -247,17 +247,15 @@ describe('im default settings store', () => {
   });
 
   it.each([
-    ['wechat', 'acceptEdits', 'WECHAT_PERMISSION_MODE_UNSUPPORTED'],
-    ['wechat', 'bypassPermissions', 'WECHAT_PERMISSION_MODE_UNSUPPORTED'],
-    ['wecom', 'acceptEdits', 'WECOM_PERMISSION_MODE_UNSUPPORTED'],
-    ['wecom', 'bypassPermissions', 'WECOM_PERMISSION_MODE_UNSUPPORTED'],
+    ['wechat', 'acceptEdits'],
+    ['wechat', 'bypassPermissions'],
+    ['wecom', 'acceptEdits'],
+    ['wecom', 'bypassPermissions'],
   ] as const)(
-    'rejects %s/%s for remote IM without changing saved defaults',
-    (channel, permissionMode, errorCode) => {
-      expect(() =>
-        writeImDefaultSettingsPatch({ permissionMode }, channel),
-      ).toThrow(errorCode);
-      expect(readImDefaultSettings(channel).permissionMode).toBe('auto');
+    'persists %s/%s using the same defaults contract as Feishu',
+    (channel, permissionMode) => {
+      writeImDefaultSettingsPatch({ permissionMode }, channel);
+      expect(readImDefaultSettings(channel).permissionMode).toBe(permissionMode);
     },
   );
 
