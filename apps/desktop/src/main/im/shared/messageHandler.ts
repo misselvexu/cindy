@@ -27,6 +27,7 @@ import {
 } from '../accountBoundary';
 
 import { getControlScope, isInControl } from './controlState';
+import { isStopCommand } from './controlCommands';
 import type { ImSlashHandlers } from './slashCommands';
 import { looksLikeSlashCommand } from './slashCommands';
 import type { ImTurnRunner } from './turnRunner';
@@ -37,10 +38,7 @@ import type { ImChannelAdapter } from './types';
  * 用 `!` 而非 slash 前缀: Slack 会把 `/` 开头的输入截为原生 slash command,
  * 普通 DM 文本里只有 `!` 前缀能原样到达 bot。
  */
-export function isStopCommand(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized === '!stop' || normalized === '！stop';
-}
+export { isStopCommand } from './controlCommands';
 
 export function createMessageHandler(
   adapter: ImChannelAdapter,

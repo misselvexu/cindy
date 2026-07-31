@@ -1,6 +1,8 @@
 import type { InteractionDecision, InteractionRequest } from '@cindy/maker-core';
 import { escapeWecomMarkdown, type IMMessageEvent, type WecomIM } from '@cindy/im';
 
+import { isStopCommand } from '../shared/controlCommands';
+
 interface PendingInteraction {
   request: InteractionRequest;
   resolve: (decision: InteractionDecision) => void;
@@ -65,6 +67,12 @@ export class WecomTextInteractions {
   private consume(event: IMMessageEvent): boolean {
     const pending = this.pending.get(event.senderId);
     if (!pending) return false;
+    if (isStopCommand(event.text)) {
+      clearTimeout(pending.timer);
+      this.pending.delete(event.senderId);
+      pending.resolve(defaultDecision(pending.request, 'wecom_interaction_cancelled_by_stop'));
+      return false;
+    }
     const decision = parseReply(pending.request, event.text);
     if (!decision) {
       void this.im.sendText(

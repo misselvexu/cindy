@@ -139,6 +139,8 @@ interface TurnState {
   buffer: string;
   /** Managed images discovered in tool output for durable text channels. */
   mediaAbsPaths: string[];
+  /** Current session root used to confine model-authored local file links. */
+  workingDir: string;
   done: boolean;
   /** 过程展示(tool_use 时间线)状态 — 见 turnActivity.ts。 */
   activity: TurnActivityState;
@@ -615,6 +617,7 @@ export function createTurnRunner(
       streamingHandlePromise: null,
       buffer: '',
       mediaAbsPaths: [],
+      workingDir: row.workingDir,
       done: false,
       activity: createTurnActivity(Date.now()),
       activityTicker: null,
@@ -2222,6 +2225,7 @@ export function createTurnRunner(
             terminal: turn.terminalKind,
             threadTs: turn.scopeKey,
             ...(turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
+            allowedFileRoots: [turn.workingDir],
             ...(turn.terminalErrorCode ? { errorCode: turn.terminalErrorCode } : {}),
           });
         }

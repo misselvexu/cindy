@@ -1,5 +1,5 @@
 import type { InteractionRequest } from '@cindy/maker-core';
-import type { IMStatus, WecomIM } from '@cindy/im';
+import type { IMMessageEvent, IMStatus, WecomIM } from '@cindy/im';
 import { describe, expect, it, vi } from 'vitest';
 
 import { formatWecomInteractionPrompt, WecomTextInteractions } from '../textInteractions';
@@ -77,5 +77,43 @@ describe('formatWecomInteractionPrompt', () => {
     expect(statusHandler).toBeDefined();
     statusHandler?.({ kind: 'idle' });
     await result;
+  });
+
+  it('待审批时让 !stop 绕过拦截器并收口当前请求', async () => {
+    let intercept: ((event: IMMessageEvent) => boolean) | undefined;
+    const sendMarkdownText = vi.fn(async () => ({ messageId: 'message-1' }));
+    const sendText = vi.fn(async () => ({ messageId: 'message-2' }));
+    const im = {
+      onTextMessageIntercept: vi.fn((handler: (event: IMMessageEvent) => boolean) => {
+        intercept = handler;
+        return () => undefined;
+      }),
+      onStatusChange: vi.fn(() => () => undefined),
+      sendMarkdownText,
+      sendText,
+    } as unknown as WecomIM;
+    const interactions = new WecomTextInteractions(im);
+
+    const result = interactions.handle('owner', permissionRequest({ command: 'rm -rf build' }));
+    await vi.waitFor(() => expect(sendMarkdownText).toHaveBeenCalledOnce());
+
+    const consumed = intercept?.({
+      channelName: 'wecom',
+      senderId: 'owner',
+      chatId: 'owner',
+      contextId: 'bot-1',
+      messageId: 'stop-1',
+      text: ' !STOP ',
+      attachments: [],
+      unsupported: [],
+    });
+
+    expect(consumed).toBe(false);
+    await expect(result).resolves.toEqual({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'wecom_interaction_cancelled_by_stop',
+    });
+    expect(sendText).not.toHaveBeenCalled();
   });
 });

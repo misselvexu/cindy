@@ -120,6 +120,8 @@ export interface ImFinalOutput {
   errorCode?: string;
   /** Managed local media discovered in the terminal assistant output. */
   mediaAbsPaths?: string[];
+  /** Host-approved roots for model-authored local file attachment links. */
+  allowedFileRoots?: string[];
 }
 
 /**

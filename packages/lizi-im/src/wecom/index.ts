@@ -40,6 +40,7 @@ import {
   mimeTypeForFilename,
   persistWecomDownload,
   readWecomOutboundFile,
+  resolveAllowedWecomOutboundFile,
   safeWecomFilename,
 } from "./media.js";
 
@@ -353,7 +354,19 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         ...(displayName ? { displayName } : {}),
       });
     };
-    for (const link of fileLinks) addAttachment(link.absPath, link.alt || undefined);
+    let rejectedFileCount = 0;
+    for (const link of fileLinks) {
+      const resolved = await resolveAllowedWecomOutboundFile(
+        link.absPath,
+        output.allowedFileRoots ?? [],
+      );
+      if (!resolved) {
+        rejectedFileCount += 1;
+        this.log.warn("skipped terminal file attachment outside allowed roots");
+        continue;
+      }
+      addAttachment(resolved, link.alt || undefined);
+    }
     for (const url of imageUrls) {
       const absPath = this.host.media?.resolveMediaUrl(url) ?? null;
       if (absPath) {
@@ -371,9 +384,13 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     const attachmentNotice = omittedAttachmentCount
       ? `⚠️ 另有 ${omittedAttachmentCount} 个附件未发送（企业微信单次最多发送 ${MAX_TERMINAL_ATTACHMENTS} 个）。`
       : "";
+    const rejectedFileNotice = rejectedFileCount
+      ? `⚠️ 有 ${rejectedFileCount} 个文件附件未发送（不在当前工作目录内或无法验证）。`
+      : "";
     const visibleText = [
       stripXdtFileLinks(stripXdtImageLinks(output.text)).trim(),
       attachmentNotice,
+      rejectedFileNotice,
     ]
       .filter(Boolean)
       .join("\n\n");

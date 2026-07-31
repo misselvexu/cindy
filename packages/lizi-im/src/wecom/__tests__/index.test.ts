@@ -26,7 +26,13 @@ class FakeClient {
     ) => Promise<Record<string, never>>
   >(async () => ({}));
   readonly replyMedia = vi.fn(async () => ({}));
-  readonly uploadMedia = vi.fn(async () => ({ media_id: "media-1" }));
+  readonly uploadMedia = vi.fn(
+    async (buffer: Buffer, options: { type: string; filename: string }) => {
+      void buffer;
+      void options;
+      return { media_id: "media-1" };
+    },
+  );
   readonly downloadFile = vi.fn(async () => ({
     buffer: Buffer.from("image"),
     filename: "photo.jpg",
@@ -276,6 +282,7 @@ describe("WecomIM routing and ownership", () => {
         text: `done\n[report.txt](${fileUrl})\n![chart](${imageUrl})`,
         terminal: "done",
         mediaAbsPaths: [imagePath],
+        allowedFileRoots: [mediaDir],
       });
 
       expect(client.sendMessage).toHaveBeenCalledWith("owner", {
@@ -290,6 +297,54 @@ describe("WecomIM routing and ownership", () => {
     } finally {
       await im.dispose();
       await rm(mediaDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not upload model-authored xdt-file links outside allowed roots", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const allowedDir = join(tmpdir(), `cindy-wecom-allowed-${randomUUID()}`);
+    const outsideDir = join(tmpdir(), `cindy-wecom-outside-${randomUUID()}`);
+    const allowedPath = join(allowedDir, "report.txt");
+    const outsidePath = join(outsideDir, "secret.txt");
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await Promise.all([
+      mkdir(allowedDir, { recursive: true }),
+      mkdir(outsideDir, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(allowedPath, "report"),
+      writeFile(outsidePath, "secret"),
+    ]);
+    try {
+      await im.init();
+      const allowedUrl = `xdt-file:///${encodeURI(allowedPath.replaceAll("\\", "/"))}`;
+      const outsideUrl = `xdt-file:///${encodeURI(outsidePath.replaceAll("\\", "/"))}`;
+      await im.commitFinal({
+        userId: "owner",
+        text: `done\n[report](${allowedUrl})\n[secret](${outsideUrl})`,
+        terminal: "done",
+        allowedFileRoots: [allowedDir],
+      });
+
+      expect(client.uploadMedia).toHaveBeenCalledOnce();
+      expect(client.uploadMedia.mock.calls[0]?.[0]).toEqual(Buffer.from("report"));
+      expect(JSON.stringify(client.uploadMedia.mock.calls)).not.toContain("secret");
+      expect(client.sendMessage).toHaveBeenCalledWith("owner", {
+        msgtype: "markdown",
+        markdown: {
+          content:
+            "done\n\n⚠️ 有 1 个文件附件未发送（不在当前工作目录内或无法验证）。",
+        },
+      });
+    } finally {
+      await im.dispose();
+      await Promise.all([
+        rm(allowedDir, { recursive: true, force: true }),
+        rm(outsideDir, { recursive: true, force: true }),
+      ]);
     }
   });
 
