@@ -257,6 +257,85 @@ describe('gateway model pricing projection', () => {
     expect(replaceGatewayModelPricing([{ id: 'shared-id' }], 'user-b')).toEqual({});
   });
 
+  it('keeps rejecting mixed-currency catalogs instead of falling back to retained quotes', () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'model-a',
+        currency: 'USD',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 混币目录同样让 gatewayPricingCatalog 返回 {},但那是刻意的整份拒绝
+    // (混币 catalog 会被账本守卫按模型选择性丢弃,比整份没有报价更难发现)。
+    // 判据是「一个 priced model 都没有」,不是「投影为空」—— 这里仍有 priced model。
+    const mixed = replaceGatewayModelPricing([
+      {
+        id: 'model-a',
+        currency: 'USD',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+      {
+        id: 'model-b',
+        currency: 'CNY',
+        inputCostPerToken: 0.00002,
+        outputCostPerToken: 0.0001,
+      },
+    ]);
+    expect(mixed).toEqual({});
+  });
+
+  it('stops reusing retained quotes once the last real pricing is too old', () => {
+    const realAt = Date.parse('2026-07-30T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(realAt);
+    replaceGatewayModelPricing([
+      {
+        id: 'aging',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 23h 后仍在窗口内 —— 沿用最后已知报价。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 23 * 3_600_000);
+    expect(Object.keys(replaceGatewayModelPricing([{ id: 'aging' }]).xd ?? {})).toEqual(['aging']);
+
+    // retained 轮不推进年龄基准:再过 2h(距最后一次真实报价 25h)即超龄,
+    // 回落无价 —— 钱不再按早已可能调整过的价格累计,token 回退仍保证可见性。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 25 * 3_600_000);
+    expect(replaceGatewayModelPricing([{ id: 'aging' }])).toEqual({});
+  });
+
+  it('leaves the last precise disk snapshot intact on retained rounds', async () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'precise',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.pricing.xd.precise.approximate).toBe(false);
+    });
+
+    // retained 轮不得覆盖磁盘快照:approximate quote 过不了 validateQuote,写进去
+    // 会让下次冷启动整份判无效 → 重启后回到「无价 = 全链归零」。
+    replaceGatewayModelPricing([{ id: 'precise' }]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const afterRetained = JSON.parse(
+      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
+    );
+    expect(afterRetained.pricing.xd.precise.approximate).toBe(false);
+
+    // 于是冷启动 hydrate 拿回的是那份**精确**报价,而不是丢失全部报价。
+    __resetModelPricingCacheForTesting();
+    const hydrated = await getModelPricing();
+    expect(hydrated?.xd?.precise).toMatchObject({ approximate: false, inputPerMtok: 3 });
+  });
+
   it('hydrates a successful empty pricing snapshot as loaded', async () => {
     replaceGatewayModelPricing([
       {

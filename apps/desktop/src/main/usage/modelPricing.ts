@@ -15,6 +15,7 @@ import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import {
   gatewayLedgerCurrency,
   gatewayPricingCatalog,
+  isPricedGatewayModel,
   getModelPriceQuote,
   subscriptionDirectPriceQuote,
 } from '../../shared/modelPriceQuote.js';
@@ -62,6 +63,18 @@ let cacheAt = 0;
 let modelSyncInflight: Promise<unknown> | null = null;
 let gatewayAccountCurrency: MoneyCurrency | null = null;
 let gatewayAccountCurrencyScope: string | null = null;
+/**
+ * 最后一次拿到**真实**报价的时刻(retained 兜底的年龄基准)。
+ * 刻意与 cacheAt 分开:cacheAt 每次同步都会刷新(含无价轮),用它做基准等于让
+ * 陈旧报价无限续期。冷启动由磁盘快照的 fetchedAt 播种,重启不重置年龄。
+ */
+let lastPricedAt = 0;
+let lastPricedAtScope: string | null = null;
+/**
+ * retained 报价的最大年龄。超过就不再沿用 —— 网关调价后继续按旧价记账是错的,
+ * 而 24h 足以覆盖一次服务端故障窗口。超龄后钱不记、token 回退仍在。
+ */
+const RETAINED_PRICING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const hydratedScopes = new Set<string>();
 const hydrateInflightByScope = new Map<string, Promise<ModelPricingCatalog | null>>();
 
@@ -225,6 +238,13 @@ async function hydrateFromDisk(scope: string): Promise<ModelPricingCatalog | nul
       cache = pricing;
       cacheScope = scope;
       cacheAt = Number(raw.fetchedAt);
+      // 磁盘快照里只可能是真实报价(retained 轮不写盘、approximate 过不了 validateQuote),
+      // 所以它的 fetchedAt 就是「最后一次真实报价」的时刻 —— 用它播种年龄基准,让 retained
+      // 的最大年龄跨重启延续,而不是每次冷启动重新给陈旧价 24 小时。
+      if (pricing.xd) {
+        lastPricedAt = Number(raw.fetchedAt);
+        lastPricedAtScope = scope;
+      }
       // 账本币种必须在这里恢复,而不是只在 getGatewayAccountCurrency 里:那个函数只服务
       // 可选的账号配额查询,而计费热路径(register.ts 的 turn 记账、prewarm)走的是
       // getModelPricing / getModelPricingForModel。冷启动只命中磁盘缓存(/models 尚未
@@ -273,11 +293,26 @@ function broadcastPricing(pricing: ModelPricingCatalog | null): void {
  * 几百万 token 一分钱没记,日志里也无任何异常(覆盖率告警的条件是
  * quoteCount < pricedCount,0 < 0 不成立)。
  *
- * 边界:
- * - 按本次清单过滤 → 已下架模型的旧价不复活(保住原有「不复活旧模型价格」的本意);
- * - scope 不同(换号 / 换区 / 换 key)不复用,旧账号的价格不外溢;
- * - 保留的 quote 标 approximate + reference-price → 金额仍进账本(用量真实发生过,
- *   记 0 才是确定性错误),但明确标注为按最后已知价折算,不谎称与账单精确一致。
+ * ── 不变量 ────────────────────────────────────────────────────────────────
+ * retained 报价是**内存态的降级兜底**,三条边界共同约束它:
+ *   (a) 只在目录本身可信、但确实一个 priced model 都没有时启用 —— 判据是
+ *       pricedCount === 0,不是「投影为空」。混币目录(declared.size > 1)也会让
+ *       gatewayPricingCatalog 返回 {},那是刻意的整份拒绝(见该函数注释:混币
+ *       catalog 会被账本守卫按模型选择性丢弃,比整份没有报价更难发现),不能被
+ *       本兜底绕过。
+ *   (b) 有最大年龄(RETAINED_PRICING_MAX_AGE_MS),且年龄以**最后一次真实报价**
+ *       为准 —— 无价刷新不续期,否则连续无价会让陈旧价无限期进账本。
+ *   (c) 绝不写入磁盘缓存。磁盘上永远只留本次真实结果或上一份精确快照:
+ *       validateQuote 明确要求 approximate === false,把 retained 写进去等于
+ *       让下次冷启动 hydrate 整体判无效(entries > 0 但全不通过 → validateCatalog
+ *       返回 null),重启后反而回到「无价 = 全链归零」。跳过写盘则重启后 hydrate
+ *       拿到的是最后一份**精确**快照。
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * 另两条既有边界:按本次清单过滤(已下架模型的旧价不复活);scope 不同(换号 /
+ * 换区 / 换 key)不复用,旧账号的价格不外溢。保留的 quote 标 approximate +
+ * reference-price → 金额仍进账本(用量真实发生过,记 0 才是确定性错误),但明确
+ * 标注为按最后已知价折算,不谎称与账单精确一致。
  */
 function retainKnownGatewayQuotes(
   models: readonly ModelAccessGatewayModel[],
@@ -285,6 +320,18 @@ function retainKnownGatewayQuotes(
 ): ModelPricingCatalog | null {
   if (models.length === 0) return null;
   if (cacheScope !== scope) return null;
+  // (a) 目录里还有 priced model 却投影为空 → 不是「无价」,是目录本身被判不可信
+  // (当前唯一成因:混币)。此时必须维持整份拒绝。
+  if (models.some(isPricedGatewayModel)) return null;
+  // (b) 最后一次真实报价太久以前 → 不再沿用。此后回落无价:钱不再记(避免按早已
+  // 调整过的价格持续累计错误金额),token 回退仍保证消息那一格有事实可看。
+  if (
+    lastPricedAtScope !== scope ||
+    lastPricedAt <= 0 ||
+    Date.now() - lastPricedAt > RETAINED_PRICING_MAX_AGE_MS
+  ) {
+    return null;
+  }
   const previous = cache?.xd;
   if (!previous) return null;
   const xd: Record<string, ModelPriceQuote> = {};
@@ -302,8 +349,8 @@ function retainKnownGatewayQuotes(
 
 /**
  * 与模型同步同快照更新 XD quote。models 非空但没有标准 input/output 价格时，
- * 回落到上一份快照里仍在清单内的报价(见 retainKnownGatewayQuotes);连旧报价也
- * 没有(冷启动首次同步就无价)时价格投影为空。
+ * 回落到上一份快照里仍在清单内的报价(见 retainKnownGatewayQuotes 的三条边界);
+ * 连旧报价也没有(冷启动首次同步就无价、混币目录、retained 超龄)时投影为空。
  */
 export function replaceGatewayModelPricing(
   models: readonly ModelAccessGatewayModel[],
@@ -314,26 +361,40 @@ export function replaceGatewayModelPricing(
   // therefore passes the authenticated user captured when the request starts,
   // so a valid startup snapshot is never persisted under `anonymous`.
   const scope = currentScope(authenticatedUserId);
-  let pricing = gatewayPricingCatalog(models, CURRENT_CINDY_REGION);
-  if (!pricing.xd) {
+  const fetched = gatewayPricingCatalog(models, CURRENT_CINDY_REGION);
+  let pricing = fetched;
+  let retainedFromLastSnapshot = false;
+  if (!fetched.xd) {
     const retained = retainKnownGatewayQuotes(models, scope);
     if (retained) {
+      const ageHours = ((Date.now() - lastPricedAt) / 3_600_000).toFixed(1);
       log.warn(
-        `xd gateway models returned no prices; retained ${Object.keys(retained.xd ?? {}).length} quote(s) from the last snapshot (marked approximate)`,
+        `xd gateway models returned no prices; retained ${Object.keys(retained.xd ?? {}).length} quote(s) from the last snapshot (marked approximate, ${ageHours}h old, disk snapshot left intact)`,
       );
       pricing = retained;
+      retainedFromLastSnapshot = true;
     }
   }
   cache = pricing;
   cacheScope = scope;
   cacheAt = Date.now();
+  if (fetched.xd) {
+    // 只有真实报价才推进年龄基准 —— retained 轮不续期(见 retainKnownGatewayQuotes (b))。
+    lastPricedAt = cacheAt;
+    lastPricedAtScope = scope;
+  }
   gatewayAccountCurrency = resolveGatewayAccountCurrency(models);
   gatewayAccountCurrencyScope = scope;
   // 账本写入层据此判断"这一笔是不是本账号的结算币种"。目录为空(登出 / clear)或混合
   // 币种时 resolveGatewayAccountCurrency 返回 null，账本随之回落构建默认值。
   setActiveLedgerCurrency(gatewayAccountCurrency);
   hydratedScopes.add(scope);
-  void writeDiskCache(scope, pricing, gatewayAccountCurrency, cacheAt);
+  // retained 轮不写盘(见 retainKnownGatewayQuotes (c)):approximate quote 过不了
+  // validateQuote,写进去会让下次冷启动整份判无效;跳过则磁盘上留着最后一份精确快照,
+  // 重启后 hydrate 正好恢复它。
+  if (!retainedFromLastSnapshot) {
+    void writeDiskCache(scope, pricing, gatewayAccountCurrency, cacheAt);
+  }
   broadcastPricing(pricing);
   return pricing;
 }
@@ -446,6 +507,8 @@ export function __resetModelPricingCacheForTesting(): void {
   modelSyncInflight = null;
   gatewayAccountCurrency = null;
   gatewayAccountCurrencyScope = null;
+  lastPricedAt = 0;
+  lastPricedAtScope = null;
   hydratedScopes.clear();
   hydrateInflightByScope.clear();
 }
