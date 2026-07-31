@@ -591,6 +591,22 @@ export function isModelPricingRefreshInFlight(): boolean {
   return modelSyncInflight !== null;
 }
 
+/**
+ * 取用时复查年龄闸 —— 降级副本一旦超龄立即停用。
+ *
+ * 决策点(sync 时的 retainKnownGatewayQuotes、冷启动的 hydrateFromDisk)只回答
+ * 「能不能**开始**沿用」,而模型目录并不周期刷新:23 小时时进入 cache 的报价,若不在
+ * 取用时复查,之后会无限期充当计费基准(断网 / 长时间无新 sync 时尤其明显)。年龄闸
+ * 因此必须是「进入前检查 + 每次用之前复查」两道,共用同一个 isRetainablePricingAge。
+ *
+ * 只约束故障态下的降级副本;正常报价与账本币种不受年龄影响。
+ */
+function pricingForRead(): ModelPricingCatalog | null {
+  if (unpricedFailureScope !== cacheScope) return cache;
+  if (isRetainablePricingAge(lastPricedAt)) return cache;
+  return {};
+}
+
 export async function getModelPricing(): Promise<ModelPricingCatalog | null> {
   const scope = currentScope();
   // 内存里已有报价、或已确认过磁盘(含确认为空)→ 直接用内存态。
@@ -598,8 +614,11 @@ export async function getModelPricing(): Promise<ModelPricingCatalog | null> {
   // prewarm 返回一份**无价**目录,那一轮把 cache 置成 {} 却没有任何磁盘依据;
   // 若在此直接短路,磁盘上最后一份精确快照就再也读不回来了(见
   // replaceGatewayModelPricing 里 isUnpricedFailure 的处理)。
-  if (cacheScope === scope && (cache?.xd || hydratedScopes.has(scope))) return cache;
-  return hydrateFromDisk(scope);
+  if (cacheScope === scope && (cache?.xd || hydratedScopes.has(scope))) {
+    return pricingForRead();
+  }
+  await hydrateFromDisk(scope);
+  return cacheScope === scope ? pricingForRead() : null;
 }
 
 /**

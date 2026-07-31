@@ -524,6 +524,30 @@ describe('gateway model pricing projection', () => {
     }
   });
 
+  it('stops serving a retained quote once it crosses the age limit while cached', async () => {
+    const realAt = Date.parse('2026-07-20T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(realAt);
+    replaceGatewayModelPricing([
+      { id: 'ages-out', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+
+    // 23h 时来一轮无价 → 仍在窗口内,沿用并进入 cache。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 23 * 3_600_000);
+    expect(replaceGatewayModelPricing([{ id: 'ages-out' }]).xd?.['ages-out']).toMatchObject({
+      approximate: true,
+    });
+    await expect(getModelPricing()).resolves.toMatchObject({
+      xd: { 'ages-out': { approximate: true } },
+    });
+
+    // 又过 2h(距最后一次真实报价 25h)但**没有**新的 sync —— 目录不周期刷新,断网时
+    // 更不会有。若年龄闸只在进入 cache 那一刻跑过一次,这份陈旧价会无限期充当计费基准。
+    // 取用时必须复查。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt + 25 * 3_600_000);
+    await expect(getModelPricing()).resolves.toEqual({});
+    await expect(getModelPricingForModel('xd', 'ages-out')).resolves.toEqual({});
+  });
+
   it('refuses to bill from a disk snapshot that is already too old', async () => {
     const realAt = Date.parse('2026-07-20T10:00:00.000Z');
     vi.spyOn(Date, 'now').mockReturnValue(realAt);
