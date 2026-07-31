@@ -58,14 +58,9 @@ export class DesktopNotifier implements Notifier {
         this.deps.logger.warn?.('WeCom group notify failed', err);
       }
     }
-    // 手机推送随 schedule 的通知意愿走:desktop / feishu 全关表示用户不想被这个
-    // 调度打扰,mobile 不得绕过(schedule 级暂无独立 mobile 开关,任一通道开启即
-    // 视为允许提醒);是否真的收到仍由手机端注册 token 决定,发送侧防打扰在
-    // device-link 模块收口,失败静默。
-    if (
-      run.sessionId &&
-      (schedule.notify.desktop || schedule.notify.feishu || schedule.notify.wecomGroup)
-    ) {
+    // 手机推送只跟随个人通知通道:desktop / feishu 全关表示用户不想被这个调度
+    // 单独打扰。wecomGroup 是共享群通知,不能隐式开启个人移动推送。
+    if (run.sessionId && (schedule.notify.desktop || schedule.notify.feishu)) {
       try {
         // 正文带运行结果摘要(与飞书卡片同源素材):成功给 resultText,失败给
         // errorMsg;缺省回退终态短文案。截断由 mobileNotify 按协议上限统一处理。

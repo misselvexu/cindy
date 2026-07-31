@@ -191,8 +191,10 @@ describe('DesktopNotifier desktop status mapping', () => {
 
     await notifier.notify(groupSchedule, { ...run('success'), resultText: '检查通过' });
     expect(publishMarkdown).toHaveBeenCalledWith(expect.stringContaining('检查通过'));
+    expect(sendMobileSessionNotify).not.toHaveBeenCalled();
 
     await expect(notifier.notify(groupSchedule, run('failed'))).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith('WeCom group notify failed', sendError);
+    expect(sendMobileSessionNotify).not.toHaveBeenCalled();
   });
 });
