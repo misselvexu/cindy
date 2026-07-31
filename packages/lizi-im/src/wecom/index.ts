@@ -50,7 +50,9 @@ const CALLBACK_TTL_MS = 4 * 60_000;
 const CALLBACK_QUEUE_CAPACITY = 64;
 const STREAM_SAFE_TIMEOUT_MS = 5 * 60_000;
 const DEDUPE_CAPACITY = 2_048;
+const MAX_TERMINAL_ATTACHMENTS = 4;
 const SECRET_WRITE_FAILED_REASON = "无法使用系统安全存储保存企业微信机器人凭证";
+const NO_ACCOUNT_SCOPE = Symbol("no-account-scope");
 
 type MessageHandler = (event: IMMessageEvent) => void;
 type StatusHandler = (status: IMStatus) => void;
@@ -91,6 +93,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   private ownerUserId = "";
   private lastAuthFailureReason = "";
   private generation = 0;
+  private accountToken: unknown = NO_ACCOUNT_SCOPE;
 
   constructor(
     host: IMHost,
@@ -361,12 +364,24 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     }
     for (const absPath of output.mediaAbsPaths ?? []) addAttachment(absPath);
 
-    const visibleText = stripXdtFileLinks(stripXdtImageLinks(output.text)).trim();
+    const omittedAttachmentCount = Math.max(
+      0,
+      attachments.length - MAX_TERMINAL_ATTACHMENTS,
+    );
+    const attachmentNotice = omittedAttachmentCount
+      ? `⚠️ 另有 ${omittedAttachmentCount} 个附件未发送（企业微信单次最多发送 ${MAX_TERMINAL_ATTACHMENTS} 个）。`
+      : "";
+    const visibleText = [
+      stripXdtFileLinks(stripXdtImageLinks(output.text)).trim(),
+      attachmentNotice,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     const chunks = chunkWecomMarkdown(
       visibleText || (attachments.length > 0 ? "📎 附件如下" : "_(空回复)_"),
     );
     await this.sendFinalChunks(output.userId, chunks);
-    for (const attachment of attachments.slice(0, 4)) {
+    for (const attachment of attachments.slice(0, MAX_TERMINAL_ATTACHMENTS)) {
       const result = await this.sendFile(
         output.userId,
         attachment.absPath,
@@ -382,6 +397,9 @@ export class WecomIM extends BaseIM implements TextChannelIM {
 
   private connect(botId: string, secret: string): void {
     const generation = (this.generation += 1);
+    this.accountToken = this.host.accountScope
+      ? this.host.accountScope.capture()
+      : NO_ACCOUNT_SCOPE;
     this.client?.disconnect();
     this.pendingFrames.clear();
     this.pendingResponses.clear();
@@ -935,7 +953,14 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   }
 
   private isCurrent(client: WSClient, generation: number): boolean {
-    return this.client === client && this.generation === generation;
+    if (this.client !== client || this.generation !== generation) return false;
+    const accountScope = this.host.accountScope;
+    if (!accountScope) return true;
+    return (
+      this.accountToken !== NO_ACCOUNT_SCOPE &&
+      this.accountToken !== null &&
+      accountScope.isCurrent(this.accountToken)
+    );
   }
 
   private setStatus(status: IMStatus): void {

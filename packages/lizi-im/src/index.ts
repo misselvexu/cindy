@@ -49,6 +49,7 @@ export {
   decodeWecomLane,
   encodeWecomGroupLane,
   chunkWecomMarkdown,
+  escapeWecomMarkdown,
 } from './wecom/codec.js';
 export {
   decodeLaneUserId as decodeTelegramLaneUserId,

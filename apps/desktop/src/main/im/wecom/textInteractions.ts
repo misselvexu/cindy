@@ -1,5 +1,5 @@
 import type { InteractionDecision, InteractionRequest } from '@cindy/maker-core';
-import type { IMMessageEvent, WecomIM } from '@cindy/im';
+import { escapeWecomMarkdown, type IMMessageEvent, type WecomIM } from '@cindy/im';
 
 interface PendingInteraction {
   request: InteractionRequest;
@@ -39,7 +39,7 @@ export class WecomTextInteractions {
     this.pending.set(userId, { request, resolve: resolvePending, timer });
 
     try {
-      await this.im.sendText(userId, formatWecomInteractionPrompt(request));
+      await this.im.sendMarkdownText(userId, formatWecomInteractionPrompt(request));
     } catch (error) {
       const current = this.pending.get(userId);
       if (current?.request.requestId === request.requestId) {
@@ -85,9 +85,12 @@ function previewPermissionInput(input: Record<string, unknown>): string {
   try {
     const json = JSON.stringify(input, null, 2);
     if (!json) return '<无法序列化>';
-    return json.length > MAX_PERMISSION_INPUT_PREVIEW
+    const preview = json.length > MAX_PERMISSION_INPUT_PREVIEW
       ? `${json.slice(0, MAX_PERMISSION_INPUT_PREVIEW)}\n…（已截断）`
       : json;
+    // Keep the surrounding template fence intact even when a string value
+    // contains model-controlled backticks. JSON's unicode escape stays valid.
+    return preview.replaceAll('`', '\\u0060');
   } catch {
     return '<无法序列化>';
   }
@@ -95,7 +98,8 @@ function previewPermissionInput(input: Record<string, unknown>): string {
 
 export function formatWecomInteractionPrompt(request: InteractionRequest): string {
   if (request.kind === 'permission') {
-    return `需要确认工具“${request.displayName ?? request.toolName}”。
+    const toolName = escapeWecomMarkdown(request.displayName ?? request.toolName);
+    return `需要确认工具“${toolName}”。
 
 参数：
 \`\`\`json
@@ -116,10 +120,10 @@ ${plan}
   if (!question) return 'Agent 正在等待你的回答，但没有可显示的问题。请回复“继续”。';
   const options = (question.options ?? [])
     .slice(0, 9)
-    .map((option, index) => `${index + 1}. ${option.label}`)
+    .map((option, index) => `${index + 1}. ${escapeWecomMarkdown(option.label)}`)
     .join('\n');
   return `Agent 需要你的回答：
-${question.question}
+${escapeWecomMarkdown(question.question)}
 ${options ? `\n${options}\n` : ''}
 请回复选项序号，或直接输入你的回答。`;
 }

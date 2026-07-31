@@ -1,7 +1,8 @@
 import type { InteractionRequest } from '@cindy/maker-core';
-import { describe, expect, it } from 'vitest';
+import type { IMStatus, WecomIM } from '@cindy/im';
+import { describe, expect, it, vi } from 'vitest';
 
-import { formatWecomInteractionPrompt } from '../textInteractions';
+import { formatWecomInteractionPrompt, WecomTextInteractions } from '../textInteractions';
 
 function permissionRequest(input: Record<string, unknown>): InteractionRequest {
   return {
@@ -43,5 +44,38 @@ describe('formatWecomInteractionPrompt', () => {
     input.self = input;
 
     expect(formatWecomInteractionPrompt(permissionRequest(input))).toContain('<无法序列化>');
+  });
+
+  it('保留模板 Markdown，并阻止参数内容闭合代码围栏', () => {
+    const prompt = formatWecomInteractionPrompt(
+      permissionRequest({ command: '```markdown\n@all' }),
+    );
+
+    expect(prompt.match(/```/g)).toHaveLength(2);
+    expect(prompt).toContain('\\u0060\\u0060\\u0060markdown');
+  });
+
+  it('通过 Markdown 通道发送审批模板', async () => {
+    const sendMarkdownText = vi.fn(async () => ({ messageId: 'message-1' }));
+    const sendText = vi.fn(async () => ({ messageId: 'message-2' }));
+    const onStatusChange = vi.fn((handler: (status: IMStatus) => void) => {
+      void handler;
+      return () => undefined;
+    });
+    const im = {
+      onTextMessageIntercept: vi.fn(() => () => undefined),
+      onStatusChange,
+      sendMarkdownText,
+      sendText,
+    } as unknown as WecomIM;
+    const interactions = new WecomTextInteractions(im);
+
+    const result = interactions.handle('owner', permissionRequest({ command: 'pnpm test' }));
+    await vi.waitFor(() => expect(sendMarkdownText).toHaveBeenCalledOnce());
+    expect(sendText).not.toHaveBeenCalled();
+    const statusHandler = onStatusChange.mock.calls[0]?.[0];
+    expect(statusHandler).toBeDefined();
+    statusHandler?.({ kind: 'idle' });
+    await result;
   });
 });

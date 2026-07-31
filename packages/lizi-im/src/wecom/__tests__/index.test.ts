@@ -293,6 +293,32 @@ describe("WecomIM routing and ownership", () => {
     }
   });
 
+  it("reports attachments omitted by the outbound safety cap", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    const sendFile = vi
+      .spyOn(im, "sendFile")
+      .mockResolvedValue({ ok: true, messageId: "attachment" });
+
+    await im.init();
+    await im.commitFinal({
+      userId: "owner",
+      text: "done",
+      terminal: "done",
+      mediaAbsPaths: ["one", "two", "three", "four", "five"],
+    });
+
+    expect(sendFile).toHaveBeenCalledTimes(4);
+    expect(client.sendMessage).toHaveBeenCalledWith("owner", {
+      msgtype: "markdown",
+      markdown: {
+        content: "done\n\n⚠️ 另有 1 个附件未发送（企业微信单次最多发送 4 个）。",
+      },
+    });
+  });
+
   it("deduplicates repeated callback message ids", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");
@@ -580,6 +606,48 @@ describe("WecomIM routing and ownership", () => {
     await flush();
     await flush();
 
+    expect(cacheMedia).not.toHaveBeenCalled();
+  });
+
+  it("does not stage inbound media after the owning account boundary closes", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const accountToken = { id: 1 };
+    let accountActive = true;
+    host.accountScope = {
+      capture: () => (accountActive ? accountToken : null),
+      isCurrent: (token) => accountActive && token === accountToken,
+      run: async (_token, operation) => operation(),
+    };
+    const client = new FakeClient();
+    const cacheMedia = vi.fn(async () => ({
+      absPath: "C:\\managed\\clip.mp4",
+      url: `cindy-media://blobs/${"a".repeat(64)}.mp4`,
+      mimeType: "video/mp4",
+    }));
+    host.media = {
+      cacheImage: vi.fn(),
+      cacheMedia,
+      getCachedImage: vi.fn(async () => null),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    accountActive = false;
+    client.emit("message.video", {
+      body: {
+        msgid: "closed-account-video",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "video",
+        video: { url: "https://example.invalid/video" },
+      },
+    });
+    await flush();
+
+    expect(client.downloadFile).not.toHaveBeenCalled();
     expect(cacheMedia).not.toHaveBeenCalled();
   });
 
