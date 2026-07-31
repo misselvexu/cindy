@@ -398,6 +398,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       visibleText || (attachments.length > 0 ? "📎 附件如下" : "_(空回复)_"),
     );
     await this.sendFinalChunks(output.userId, chunks);
+    let failedAttachmentCount = 0;
     for (const attachment of attachments.slice(0, MAX_TERMINAL_ATTACHMENTS)) {
       const result = await this.sendFile(
         output.userId,
@@ -405,9 +406,23 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         attachment.displayName,
       );
       if (!result.ok) {
+        failedAttachmentCount += 1;
         this.log.warn("failed to send terminal attachment", {
           reason: result.reason,
         });
+      }
+    }
+    if (failedAttachmentCount > 0) {
+      try {
+        await this.sendMarkdownText(
+          output.userId,
+          `⚠️ 有 ${failedAttachmentCount} 个附件发送失败，请稍后重试。`,
+        );
+      } catch (error) {
+        this.log.warn(
+          "failed to report terminal attachment delivery failure",
+          safeError(error),
+        );
       }
     }
   }

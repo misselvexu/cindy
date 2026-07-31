@@ -374,6 +374,34 @@ describe("WecomIM routing and ownership", () => {
     });
   });
 
+  it("notifies the recipient when a terminal attachment fails to send", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    vi.spyOn(im, "sendFile").mockResolvedValue({
+      ok: false,
+      reason: "UPLOAD_FAIL",
+    });
+
+    await im.init();
+    await im.commitFinal({
+      userId: "owner",
+      text: "done",
+      terminal: "done",
+      mediaAbsPaths: ["missing"],
+    });
+
+    expect(client.sendMessage).toHaveBeenNthCalledWith(1, "owner", {
+      msgtype: "markdown",
+      markdown: { content: "done" },
+    });
+    expect(client.sendMessage).toHaveBeenNthCalledWith(2, "owner", {
+      msgtype: "markdown",
+      markdown: { content: "⚠️ 有 1 个附件发送失败，请稍后重试。" },
+    });
+  });
+
   it("deduplicates repeated callback message ids", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");
