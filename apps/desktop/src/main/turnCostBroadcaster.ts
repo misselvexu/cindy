@@ -23,6 +23,7 @@
 import { BrowserWindow } from 'electron';
 import type { SendOrigin } from '@cindy/maker-core';
 
+import type { MessageTurnCostPayload } from '../shared/turnCostPayload.js';
 import type { TurnUsageDetails } from '../shared/turnUsageDetails.js';
 import {
   patchMessageAgentMetaWithResult,
@@ -47,26 +48,10 @@ const log = createLogger('turnCostBroadcaster');
 /** IPC channel: main → renderer 推单条消息的 per-turn 费用。 */
 export const MESSAGE_TURN_COST_CHANGED = 'usage:message-turn-cost';
 
-/**
- * 金额字段整组可选:无报价轮(recordTurnUsageOnMessage)只带 turnUsageDetails,
- * 消费方据此退回 token 展示。有金额的轮次这些字段一定成组出现,不存在只有
- * turnMoney 没有 userTurnMoney 的中间态。
- */
-export interface MessageTurnCostPayload {
-  sessionId: string;
-  /** 该轮最后一条 assistant 的 messages.client_id。 */
-  clientId: string;
-  turnMoney?: RegionalMoney;
-  turnCostUsd?: number;
-  turnCostIsEstimate?: boolean;
-  /** User-visible cumulative cost from the latest real user prompt through this message. */
-  userTurnMoney?: RegionalMoney;
-  userTurnCostUsd?: number;
-  /** True when any segment in userTurnCostUsd is a subscription-value estimate. */
-  userTurnCostIsEstimate?: boolean;
-  /** 本轮 token/cache 明细;旧消息或取不到 usage 时缺省。 */
-  turnUsageDetails?: TurnUsageDetails;
-}
+// payload 契约的正本在 shared(跨进程协议不放 main —— 否则 renderer 的类型图会反向
+// 依赖 main 实现模块,把 Electron / DB / 调度器副作用拖进 renderer 工具链)。这里再导出
+// 一次,既有 import 路径不变。
+export type { MessageTurnCostPayload } from '../shared/turnCostPayload.js';
 
 /** 测试注入用依赖(patch / broadcast 可替换,免 Electron / sqlite)。 */
 export interface TurnCostDeps {

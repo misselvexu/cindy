@@ -3250,7 +3250,7 @@ interface ElectronAPI {
   // 必填,消费方在 typecheck 通过的情况下解引用 undefined。
   onUsageMessageTurnCost: (
     cb: (
-      data: import('../main/turnCostBroadcaster').MessageTurnCostPayload,
+      data: import('../shared/turnCostPayload').MessageTurnCostPayload,
     ) => void,
   ) => () => void;
 
