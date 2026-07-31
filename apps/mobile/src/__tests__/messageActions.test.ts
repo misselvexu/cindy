@@ -22,11 +22,14 @@ function money(
   amount: number,
   currency: RemoteMoneyCurrency = 'USD',
   estimate = false,
+  // 近似的**实际成本**(桌面按最后已知报价折算):approximate 为真但 kind 仍是
+  // actual-cost —— 与订阅价值估算是两种不同的降级。
+  approximateActualCost = false,
 ): RemoteMoney {
   return {
     amount,
     currency,
-    approximate: estimate,
+    approximate: estimate || approximateActualCost,
     kind: estimate ? 'value-estimate' : 'actual-cost',
   };
 }
@@ -157,6 +160,15 @@ describe('messageActions', () => {
     expect(formatMessageTurnCost(money(0.034, 'USD', true))).toBe('价值 $0.03');
     expect(formatMessageTurnCost(money(0.034, 'CNY'))).toBe('¥0.03');
     expect(formatMessageTurnCost(money(0))).toBe('');
+  });
+
+  // 桌面按最后已知报价折算的金额(approximate 的 actual-cost):不能与精确账单同款,
+  // 加 ~ 自证近似;而 usdMoney 对 actual-cost 恒给 approximate=false,旧消息不受影响。
+  it('marks reference-priced amounts as approximate like the desktop action bar', () => {
+    expect(formatMessageTurnCost(money(0.42, 'USD', false, true))).toBe('~$0.42');
+    expect(formatMessageTurnCost(money(0.42, 'USD'))).toBe('$0.42');
+    // 订阅价值估算仍走「价值」文案,不被近似分支截走。
+    expect(formatMessageTurnCost(money(0.42, 'USD', true))).toBe('价值 $0.42');
   });
 
   // 金额缺席时(桌面算不出模型报价)操作行退回显示本轮 token,数字口径与桌面同源。

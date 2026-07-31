@@ -141,9 +141,17 @@ export function formatMessageAbsoluteTime(createdAt: string): string {
 export function formatMessageTurnCost(money: RemoteMoney | undefined): string {
   if (!money || !Number.isFinite(money.amount) || money.amount <= 0) return '';
   const value = formatTurnCost(money);
-  return money.kind === 'value-estimate'
-    ? i18n.t('message.actions.turnCostValue', { value })
-    : value;
+  if (money.kind === 'value-estimate') {
+    return i18n.t('message.actions.turnCostValue', { value });
+  }
+  // 近似的**实际成本**:桌面在网关目录暂时不下发价格时按最后已知报价折算(kind 仍是
+  // actual-cost —— 它确实是成本量级,不是订阅价值折算)。不能与精确账单金额同款显示,
+  // 加 ~ 让它自证近似。`approximate && actual-cost` 目前只有这一个来源:
+  // usdMoney 对 actual-cost 恒给 approximate=false,所以旧消息不会被误标。
+  if (money.approximate) {
+    return i18n.t('message.actions.turnCostApprox', { value });
+  }
+  return value;
 }
 
 /**

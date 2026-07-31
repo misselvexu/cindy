@@ -358,6 +358,13 @@ export function MessageActionBar({
     'text-[var(--settings-section-desc)] cursor-default',
   );
 
+  // 按「最后已知报价」折算的金额:kind 仍是 actual-cost(它确实是成本量级,不是订阅
+  // 价值折算),所以不走上面 estimate 那条"价值"文案 —— 但也不能与精确账单同款显示。
+  // 加 ~ 前缀让它当场自证近似,完整原因在 tooltip 的 referencePriceLine。
+  const isReferencePriced =
+    displayedMoney?.estimateReasons?.includes('reference-price') === true &&
+    !displayedCostIsEstimate;
+
   const costText = displayedMoney && displayedMoney.amount > 0 && (
     <Tooltip.Root key="cost">
       <Tooltip.Trigger asChild>
@@ -366,7 +373,11 @@ export function MessageActionBar({
             ? t('chat.messageActionBar.turnCostEstimatedValue', {
                 cost: formatTurnCostMoney(displayedMoney),
               })
-            : formatTurnCostMoney(displayedMoney)}
+            : isReferencePriced
+              ? t('chat.messageActionBar.turnCostApproxValue', {
+                  cost: formatTurnCostMoney(displayedMoney),
+                })
+              : formatTurnCostMoney(displayedMoney)}
         </span>
       </Tooltip.Trigger>
       <Tooltip.Content>

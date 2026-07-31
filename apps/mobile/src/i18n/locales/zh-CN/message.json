@@ -123,6 +123,7 @@
     "minutesAgo": "{{n}} 分钟前",
     "hoursAgo": "{{n}} 小时前",
     "turnCostValue": "价值 {{value}}",
+    "turnCostApprox": "~{{value}}",
     "turnTokens": "{{tokens}} tokens"
   },
   "lightbox": {

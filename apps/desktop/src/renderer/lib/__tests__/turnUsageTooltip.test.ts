@@ -156,27 +156,85 @@ describe('buildTurnUsageTooltipLines — 无金额 (token 回退) tooltip', () =
 
   it('无金额 → 末尾追加「取不到报价」说明, 避免被读成"这轮不花钱"', () => {
     const out = buildTurnUsageTooltipLines({ details, t });
-    expect(out[out.length - 1]).toBe('usageDetails.priceUnavailable');
+    expect(out[out.length - 1]).toBe('usageDetails.noBilledCost');
   });
 
   it('有金额 → 不出现该说明行', () => {
     expect(
       buildTurnUsageTooltipLines({ details, t, costUsd: 0.42 }),
-    ).not.toContain('usageDetails.priceUnavailable');
+    ).not.toContain('usageDetails.noBilledCost');
     expect(
       buildTurnUsageTooltipLines({
         details,
         t,
         money: { amount: 3.5, currency: 'CNY', approximate: false, kind: 'actual-cost' },
       }),
-    ).not.toContain('usageDetails.priceUnavailable');
+    ).not.toContain('usageDetails.noBilledCost');
   });
 
   it('金额为 0 / 负 → 视同无金额, 仍给说明行 (绝不显示 $0.00 当事实)', () => {
     const zero = buildTurnUsageTooltipLines({ details, t, costUsd: 0 });
-    expect(zero).toContain('usageDetails.priceUnavailable');
+    expect(zero).toContain('usageDetails.noBilledCost');
     const negative = buildTurnUsageTooltipLines({ details, t, costUsd: -1 });
-    expect(negative).toContain('usageDetails.priceUnavailable');
+    expect(negative).toContain('usageDetails.noBilledCost');
+  });
+
+  // 说明行刻意**不断言原因**:这一层分不清「价格字段缺失」与「显式全 0 的免费模型」,
+  // 断言"取不到报价"会对后者给出错误解释。
+  it('说明行不断言原因 (免费模型与缺价轮共用同一句)', () => {
+    const out = buildTurnUsageTooltipLines({ details, t });
+    expect(out).toContain('usageDetails.noBilledCost');
+    expect(out.some((l) => l.includes('priceUnavailable'))).toBe(false);
+  });
+});
+
+describe('buildTurnUsageTooltipLines — 按最后已知报价折算的金额', () => {
+  const details = buildTurnUsageDetails({
+    inputTokens: 1_000,
+    outputTokens: 500,
+    model: 'claude-opus-5',
+  })!;
+  const referencePriced = {
+    amount: 0.42,
+    currency: 'USD' as const,
+    approximate: true,
+    kind: 'actual-cost' as const,
+    estimateReasons: ['reference-price' as const],
+  };
+
+  it('带 reference-price → 追加来源说明行 (否则与精确账单同款、降级语义用户看不见)', () => {
+    const out = buildTurnUsageTooltipLines({ details, t, money: referencePriced });
+    // kind 仍是 actual-cost,所以走 costLine 而不是 valueLine。
+    expect(out.some((l) => l.startsWith('usageDetails.costLine'))).toBe(true);
+    expect(out).toContain('usageDetails.referencePriceLine');
+    // 有金额时不该再出现「未计费」那句。
+    expect(out).not.toContain('usageDetails.noBilledCost');
+  });
+
+  it('精确报价 → 不出现来源说明行', () => {
+    const out = buildTurnUsageTooltipLines({
+      details,
+      t,
+      money: { amount: 0.42, currency: 'USD', approximate: false, kind: 'actual-cost' },
+    });
+    expect(out).not.toContain('usageDetails.referencePriceLine');
+  });
+
+  it('订阅价值估算 → 走 valueLine, 不误加 reference-price 说明', () => {
+    const out = buildTurnUsageTooltipLines({
+      details,
+      t,
+      isEstimate: true,
+      money: {
+        amount: 0.42,
+        currency: 'USD',
+        approximate: true,
+        kind: 'value-estimate',
+        estimateReasons: ['subscription-value'],
+      },
+    });
+    expect(out.some((l) => l.startsWith('usageDetails.valueLine'))).toBe(true);
+    expect(out).not.toContain('usageDetails.referencePriceLine');
   });
 });
 

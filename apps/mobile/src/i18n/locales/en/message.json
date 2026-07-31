@@ -123,6 +123,7 @@
     "minutesAgo": "{{n}} min ago",
     "hoursAgo": "{{n}} h ago",
     "turnCostValue": "Est. {{value}}",
+    "turnCostApprox": "~{{value}}",
     "turnTokens": "{{tokens}} tokens"
   },
   "lightbox": {

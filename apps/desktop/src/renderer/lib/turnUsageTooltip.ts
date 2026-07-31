@@ -78,6 +78,13 @@ export function buildTurnUsageTooltipLines({
     lines.push(t(isEstimate ? 'usageDetails.valueLine' : 'usageDetails.costLine', {
       cost: formattedCost,
     }));
+    // 按「最后已知报价」折算的金额必须自证来源:它的 kind 仍是 actual-cost(确实是
+    // 成本量级,不是订阅价值折算),所以不会被 isEstimate 分流到 valueLine —— 若这里
+    // 不交代,用户看到的与精确账单金额完全同款,PR 声称的 reference-price 降级语义
+    // 就只留在 RegionalMoney 内部、用户看不见。
+    if (money?.estimateReasons?.includes('reference-price')) {
+      lines.push(t('usageDetails.referencePriceLine'));
+    }
   }
   // 按模型成本明细: 仅在 ≥2 个模型时展开 (单模型已由下方 modelLine 表达)。
   // 让用户一眼看到「主 agent + subagent (如 Task 工具跑的 Haiku) 各花了多少」。
@@ -112,10 +119,14 @@ export function buildTurnUsageTooltipLines({
   if (suggestionText) {
     lines.push(t('usageDetails.suggestionLine', { suggestion: suggestionText }));
   }
-  // 没有金额时明说原因 —— 否则「只有 token、没有钱」会被读成"这轮不花钱"。
+  // 没有金额时交代一句,否则「只有 token、没有钱」会被读成事实缺失。
+  // 刻意**不断言原因**:这一层分不清「价格字段缺失(该计费但算不出来)」与
+  // 「目录显式全 0 的免费模型(本来就不计费)」—— 两者到这里都只有 token 明细。
+  // 断言"取不到报价"会对免费模型给出错误解释;缺价那个故障态由 main 侧的
+  // 「carry no price fields at all」告警负责可观测,不靠用户 tooltip 猜。
   // 与建议行同属尾部附注区:主体先给事实,解释放最后。
   if (!formattedCost) {
-    lines.push(t('usageDetails.priceUnavailable'));
+    lines.push(t('usageDetails.noBilledCost'));
   }
   return lines;
 }

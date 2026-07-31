@@ -256,7 +256,7 @@ describe('MessageActionBar', () => {
         [
           'usageDetails.tokenLine',
           'usageDetails.cacheLine',
-          'usageDetails.priceUnavailable',
+          'usageDetails.noBilledCost',
         ].join('\n'),
       );
       // 没有钱就不出现任何费用文案。
@@ -315,6 +315,49 @@ describe('MessageActionBar', () => {
         />,
       );
       expect(screen.queryByText('chat.messageActionBar.turnTokens')).toBeNull();
+    });
+
+    // 按最后已知报价折算的金额:kind 仍是 actual-cost,不走「价值」文案,
+    // 但必须与精确账单区分开 —— 加 ~ 前缀当场自证近似。
+    it('reference-price 金额 → 加 ~ 前缀并在 tooltip 交代来源', () => {
+      render(
+        <MessageActionBar
+          copyText="message body"
+          align="left"
+          hovered
+          turnMoney={{
+            amount: 1.5,
+            currency: 'CNY',
+            approximate: true,
+            kind: 'actual-cost',
+            estimateReasons: ['reference-price'],
+          }}
+          turnUsageDetails={details}
+        />,
+      );
+
+      expect(screen.getByText('chat.messageActionBar.turnCostApproxValue')).toBeTruthy();
+      expect(screen.queryByText('¥1.50')).toBeNull();
+      const tooltip = screen.getByText(
+        (_, element) =>
+          element?.classList.contains('whitespace-pre-line') === true &&
+          element.textContent?.includes('usageDetails.tokenLine') === true,
+      );
+      expect(tooltip.textContent).toContain('usageDetails.referencePriceLine');
+    });
+
+    it('精确报价金额 → 不加 ~ 前缀', () => {
+      render(
+        <MessageActionBar
+          copyText="message body"
+          align="left"
+          hovered
+          turnMoney={{ amount: 1.5, currency: 'CNY', approximate: false, kind: 'actual-cost' }}
+          turnUsageDetails={details}
+        />,
+      );
+      expect(screen.queryByText('chat.messageActionBar.turnCostApproxValue')).toBeNull();
+      expect(screen.getByText('¥1.50')).toBeTruthy();
     });
 
     it('user 侧(align=right)不出现 token 格', () => {
