@@ -697,6 +697,38 @@ function readTimestamp(value: unknown): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+/**
+ * agentMeta 里一对「金额 + 旧版 USD 数字 + 估算标记」→ 操作行可显示的金额投影。
+ * 用户轮累计与当前 segment 走同一个实现,免得两处各写一份判据后漂移。
+ */
+function projectTurnMoney(
+  money: unknown,
+  legacyUsd: unknown,
+  isEstimateFlag: boolean,
+): Pick<NormalizedRemoteMessage, 'turnMoney' | 'turnCostUsd' | 'turnCostIsEstimate'> | null {
+  const normalized = normalizeRemoteMoney(money);
+  if (normalized && normalized.amount > 0) {
+    const isEstimate = isEstimateFlag || normalized.kind === 'value-estimate';
+    return {
+      turnMoney: normalized,
+      ...(normalized.currency === 'USD' ? { turnCostUsd: normalized.amount } : {}),
+      turnCostIsEstimate: isEstimate,
+    };
+  }
+  const cost = readNumber(legacyUsd);
+  if (cost === null || cost <= 0) return null;
+  return {
+    turnMoney: {
+      amount: cost,
+      currency: 'USD',
+      approximate: isEstimateFlag,
+      kind: isEstimateFlag ? 'value-estimate' : 'actual-cost',
+    },
+    turnCostUsd: cost,
+    turnCostIsEstimate: isEstimateFlag,
+  };
+}
+
 function readTurnCost(
   message: RemoteMessage,
 ): Pick<
@@ -708,29 +740,22 @@ function readTurnCost(
   const totalTokens = readNumber(readRecord(message.agentMeta?.turnUsageDetails)?.totalTokens);
   const usage: Pick<NormalizedRemoteMessage, 'turnTotalTokens'> =
     totalTokens !== null && totalTokens > 0 ? { turnTotalTokens: totalTokens } : {};
-  const money = normalizeRemoteMoney(message.agentMeta?.turnCost);
-  if (money && money.amount > 0) {
-    return {
-      ...usage,
-      turnMoney: money,
-      ...(money.currency === 'USD' ? { turnCostUsd: money.amount } : {}),
-      turnCostIsEstimate: money.kind === 'value-estimate',
-    };
-  }
-  const cost = readNumber(message.agentMeta?.turnCostUsd);
-  if (cost === null || cost <= 0) return usage;
-  const isEstimate = message.agentMeta?.turnCostIsEstimate === true;
-  return {
-    ...usage,
-    turnMoney: {
-      amount: cost,
-      currency: 'USD',
-      approximate: isEstimate,
-      kind: isEstimate ? 'value-estimate' : 'actual-cost',
-    },
-    turnCostUsd: cost,
-    turnCostIsEstimate: isEstimate,
-  };
+  // 整轮累计优先于当前 segment(与桌面 MessageActionBar 的 displayedMoney 同口径):
+  // 一次用户请求含多个自动续跑 segment 时,操作行只挂在收尾正文上,而它要承载整轮总额;
+  // 收尾 segment 缺报价的轮次更是只有 userTurnCost。两者独立判定,不互为前提
+  // (不变量正本见 apps/desktop/src/shared/turnCostPayload.ts)。
+  const projected =
+    projectTurnMoney(
+      message.agentMeta?.userTurnCost,
+      message.agentMeta?.userTurnCostUsd,
+      message.agentMeta?.userTurnCostIsEstimate === true,
+    ) ??
+    projectTurnMoney(
+      message.agentMeta?.turnCost,
+      message.agentMeta?.turnCostUsd,
+      message.agentMeta?.turnCostIsEstimate === true,
+    );
+  return projected ? { ...usage, ...projected } : usage;
 }
 
 // 桌面 main 在 turn 结束检测到模型被上游降级时写 agentMeta.modelMismatch =

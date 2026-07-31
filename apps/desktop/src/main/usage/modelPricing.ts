@@ -563,15 +563,14 @@ export function replaceGatewayModelPricing(
   // retainKnownGatewayQuotes (a-2) 同源:显式全 0 的免费目录**下发了**价格,它是有效
   // 快照(重启后就该 hydrate 成"没有报价"),不能混进故障态;models 为空(登出 / clear)
   // 同理照常落盘。
-  // 两个相关但**不同**的概念,排除项不一样:
+  // 两个相关但**不同**的概念,各管一件事:
   //
   // carriesNoPriceFields —— 本次没下发任何价格字段。它只决定「磁盘上那份还是不是当前
-  //   最可信的事实」:是,就不许覆盖、也不标 hydrated(留给迟到的 prewarm 读回来)。
-  //   混币且无价同样算 —— 目录不可信不代表磁盘那份不可信。
+  //   最可信的事实」,也就是**别覆盖磁盘**。混币且无价同样算 —— 目录不可信不代表磁盘
+  //   那份不可信,留着等目录恢复正常再启用。
   // isUnpricedFailure —— 可以**沿用**最后已知报价的故障态,额外排除混币:目录不可信时
-  //   不能借「没下发价格」之名沿用旧价,否则 hydrate 的投影会成为绕过
-  //   retainKnownGatewayQuotes 混币拒绝的后门。混币无价时退回既有的磁盘缓存语义
-  //   (hydrate 恢复精确快照、不投影),那条路径本 PR 不改口径。
+  //   不能借「没下发价格」之名沿用旧价,否则会成为绕过 retainKnownGatewayQuotes 混币
+  //   拒绝的后门。
   const carriesNoPriceFields =
     models.length > 0 && !fetched.xd && !models.some(declaresGatewayTokenPrice);
   const isUnpricedFailure = carriesNoPriceFields && isRetainableUnpricedCatalog(models);
@@ -582,11 +581,17 @@ export function replaceGatewayModelPricing(
   } else if (unpricedFailureScope === scope) {
     unpricedFailureScope = null;
   }
-  // 故障轮不标 hydrated:冷启动时 /models 可能早于 prewarm 返回无价目录,此时 cacheScope
-  // 还没指向本账号 → retained 必然拿不到旧报价。若在这里标成已 hydrate,迟到的 prewarm
-  // 会被 getModelPricing / hydrateFromDisk 的短路挡住,永远读不回磁盘上那份精确快照
-  // —— 恰好在本次线上无价故障场景下,重启反而彻底失去最后已知报价。
-  if (!carriesNoPriceFields) hydratedScopes.add(scope);
+  // 只有**可沿用的**故障轮不标 hydrated:冷启动时 /models 可能早于 prewarm 返回无价目录,
+  // 此时 cacheScope 还没指向本账号 → retained 必然拿不到旧报价。若在这里标成已 hydrate,
+  // 迟到的 prewarm 会被 getModelPricing / hydrateFromDisk 的短路挡住,永远读不回磁盘上那份
+  // 精确快照 —— 恰好在本次线上无价故障场景下,重启反而彻底失去最后已知报价。
+  //
+  // 判据必须是 isUnpricedFailure 而不是 carriesNoPriceFields:混币无价是**整份拒绝**,
+  // 若也把冷启动读盘的门留着,hydrateFromDisk 会把磁盘上的精确快照原样恢复
+  // (unpricedFailureScope 未设 → 不标近似、不过年龄闸)继续记账,等于从另一条路绕过了
+  // 混币拒绝。混币轮照常标 hydrated:内存空报价 = 本轮不记账(与本 PR 之前的行为一致),
+  // token 回退仍保证消息那一格有事实可看;磁盘那份由 preserveDiskQuotes 原样留着。
+  if (!isUnpricedFailure) hydratedScopes.add(scope);
   // 写盘照常发生(accountCurrency 要能随快照恢复,与有没有报价无关),但故障轮与
   // retained 轮不得用自己的报价取代磁盘上那份 —— 由 preserveDiskQuotes 兜住。
   enqueueDiskWrite(() =>

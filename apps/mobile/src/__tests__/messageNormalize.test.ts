@@ -149,6 +149,47 @@ describe('normalizeRemoteMessages', () => {
     expect(items[3].turnTotalTokens).toBeUndefined();
   });
 
+  // 整轮累计与当前 segment 是两个独立事实(不变量正本见
+  // apps/desktop/src/shared/turnCostPayload.ts):操作行只挂在收尾正文上,它要承载整轮
+  // 总额;收尾 segment 缺报价的轮次更是只有 userTurnCost —— 不读它就会用 token 把已经
+  // 花掉的钱顶掉。
+  it('prefers the user-round total over the trailing segment cost', () => {
+    const items = normalizeRemoteMessages([
+      message({
+        id: 'usage-only-with-total',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: {
+          userTurnCost: { amount: 1.25, currency: 'USD', approximate: false, kind: 'actual-cost' },
+          userTurnCostUsd: 1.25,
+          userTurnCostIsEstimate: true,
+          turnUsageDetails: { totalTokens: 2_100_000 },
+        },
+      }),
+      message({
+        id: 'total-wins-over-segment',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: {
+          turnCostUsd: 0.3,
+          userTurnCostUsd: 1.8,
+          userTurnCostIsEstimate: false,
+        },
+      }),
+    ]);
+
+    // 无当前分段金额,但整轮已经花过钱 → 显示金额,不回退 token。
+    expect(items[0]).toMatchObject({
+      turnCostUsd: 1.25,
+      turnCostIsEstimate: true,
+      turnTotalTokens: 2_100_000,
+      turnCompleted: true,
+    });
+    expect(items[0].turnMoney).toMatchObject({ amount: 1.25, currency: 'USD' });
+    // 两者都有时取整轮累计(与桌面 displayedMoney 同口径)。
+    expect(items[1].turnCostUsd).toBe(1.8);
+  });
+
   it('preserves assistant streaming state from desktop message metadata and content', () => {
     const items = normalizeRemoteMessages([
       message({

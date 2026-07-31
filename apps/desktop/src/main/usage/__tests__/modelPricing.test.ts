@@ -538,9 +538,10 @@ describe('gateway model pricing projection', () => {
       expect(raw.pricing.xd['mixed-guard'].approximate).toBe(false);
     });
 
-    // 混币 + 无价格字段:内存路径明确拒绝(整份不可信)。故障态标记若只看「有没有下发
-    // 价格字段」,冷启动 hydrate 就会把旧报价投影成 approximate 继续记账 —— 等于给混币
-    // 拒绝开了后门。准入判据两条路径共用后,这里不得进入故障态。
+    // 混币 + 无价格字段 = 整份不可信,内存与冷启动两条路径都必须拒绝:
+    // · 内存:retainKnownGatewayQuotes 不沿用旧报价 → 投影为空;
+    // · 冷启动:也不能把「没下发价格」当作留门理由 —— 否则 hydrateFromDisk 会把磁盘上的
+    //   精确快照原样恢复(不标近似、不过年龄闸)继续记账,从另一条路绕过混币拒绝。
     __resetModelPricingCacheForTesting();
     expect(
       replaceGatewayModelPricing([
@@ -549,10 +550,13 @@ describe('gateway model pricing projection', () => {
       ]),
     ).toEqual({});
 
-    // 磁盘那份仍是可信事实,不该被覆盖;hydrate 走既有缓存语义恢复**精确**快照,
-    // 而不是本 PR 新增的降级副本(不带 approximate)。
-    const hydrated = await getModelPricing();
-    expect(hydrated?.xd?.['mixed-guard']).toMatchObject({
+    // 本轮不记账(与本 PR 之前对混币目录的行为一致),token 回退仍显示用量。
+    expect(await getModelPricing()).toEqual({});
+
+    // 但磁盘那份仍是可信事实,一个字段都没被覆盖 —— 目录恢复正常后还能用。
+    await __flushDiskWritesForTesting();
+    const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+    expect(raw.pricing.xd['mixed-guard']).toMatchObject({
       inputPerMtok: 3,
       approximate: false,
     });
