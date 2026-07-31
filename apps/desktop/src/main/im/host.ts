@@ -87,6 +87,21 @@ const host: IMHost = {
       });
       return { absPath: hit.absPath, url: hit.url };
     },
+    cacheMedia: async ({ integration, token, buffer, mimeType }) => {
+      const hit = await integrationCachePut({
+        cacheKey: integrationCacheKey(integration, token),
+        integration,
+        buffer,
+        mimeType,
+        // IM 入站媒体与图片同属不可再生的用户附件，不参与缓存回收。
+        isCache: false,
+      });
+      return {
+        absPath: hit.absPath,
+        url: hit.url,
+        mimeType: hit.mimeType,
+      };
+    },
     getCachedImage: async (integration, token) => {
       const hit = await integrationCacheGet(integrationCacheKey(integration, token));
       if (!hit) return null;

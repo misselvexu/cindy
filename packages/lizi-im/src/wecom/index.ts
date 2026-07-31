@@ -130,65 +130,81 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       ownerUserId: this.ownerUserId || null,
       ...(saveErrorStatus ? { saveErrorStatus } : {}),
     });
+    const runAccountScoped = <T>(operation: () => Promise<T>): Promise<T> => {
+      const accountScope = this.host.accountScope;
+      if (!accountScope) return operation();
+      const token = accountScope.capture();
+      if (token === null) {
+        return Promise.reject(
+          new Error("[IM_NOT_READY] IM account is not active"),
+        );
+      }
+      return accountScope.run(token, operation);
+    };
 
     this.host.ipc.handle("wecomBot:get-status", () => state());
-    this.host.ipc.handle("wecomBot:set-config", async (payload) => {
-      const record = isRecord(payload) ? payload : {};
-      const botId = typeof record.botId === "string" ? record.botId.trim() : "";
-      const secret =
-        typeof record.secret === "string" ? record.secret.trim() : "";
-      if (!botId || !secret) {
-        const failed: IMStatus = {
-          kind: "error",
-          reason: "Bot ID 和 Secret 不能为空",
-        };
-        this.setStatus(failed);
-        return state(failed);
-      }
-      if (!this.host.secrets.isAvailable()) {
-        const failed: IMStatus = {
-          kind: "error",
-          reason: SECRET_WRITE_FAILED_REASON,
-        };
-        this.setStatus(failed);
-        return state(failed);
-      }
+    this.host.ipc.handle("wecomBot:set-config", (payload) =>
+      runAccountScoped(async () => {
+        const record = isRecord(payload) ? payload : {};
+        const botId =
+          typeof record.botId === "string" ? record.botId.trim() : "";
+        const secret =
+          typeof record.secret === "string" ? record.secret.trim() : "";
+        if (!botId || !secret) {
+          const failed: IMStatus = {
+            kind: "error",
+            reason: "Bot ID 和 Secret 不能为空",
+          };
+          this.setStatus(failed);
+          return state(failed);
+        }
+        if (!this.host.secrets.isAvailable()) {
+          const failed: IMStatus = {
+            kind: "error",
+            reason: SECRET_WRITE_FAILED_REASON,
+          };
+          this.setStatus(failed);
+          return state(failed);
+        }
 
-      const previousBotId = this.host.secrets.read(BOT_ID_SECRET_KEY);
-      const previousSecret = this.host.secrets.read(BOT_SECRET_SECRET_KEY);
-      const previousOwner = this.host.secrets.read(OWNER_USER_ID_SECRET_KEY);
-      const botChanged = Boolean(
-        previousBotId?.trim() && previousBotId.trim() !== botId,
-      );
-      const saved =
-        this.host.secrets.write(BOT_ID_SECRET_KEY, botId) &&
-        this.host.secrets.write(BOT_SECRET_SECRET_KEY, secret);
-      if (!saved) {
-        this.restoreSecret(BOT_ID_SECRET_KEY, previousBotId);
-        this.restoreSecret(BOT_SECRET_SECRET_KEY, previousSecret);
-        this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwner);
-        const failed: IMStatus = {
-          kind: "error",
-          reason: SECRET_WRITE_FAILED_REASON,
-        };
-        this.setStatus(failed);
-        return state(failed);
-      }
-      if (botChanged) {
-        this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
-        this.ownerUserId = "";
-      }
-      this.botId = botId;
-      this.connect(botId, secret);
-      return state();
-    });
-    this.host.ipc.handle("wecomBot:reconnect", () => {
-      const botId = this.host.secrets.read(BOT_ID_SECRET_KEY)?.trim() ?? "";
-      const secret =
-        this.host.secrets.read(BOT_SECRET_SECRET_KEY)?.trim() ?? "";
-      if (botId && secret) this.connect(botId, secret);
-      return state();
-    });
+        const previousBotId = this.host.secrets.read(BOT_ID_SECRET_KEY);
+        const previousSecret = this.host.secrets.read(BOT_SECRET_SECRET_KEY);
+        const previousOwner = this.host.secrets.read(OWNER_USER_ID_SECRET_KEY);
+        const botChanged = Boolean(
+          previousBotId?.trim() && previousBotId.trim() !== botId,
+        );
+        const saved =
+          this.host.secrets.write(BOT_ID_SECRET_KEY, botId) &&
+          this.host.secrets.write(BOT_SECRET_SECRET_KEY, secret);
+        if (!saved) {
+          this.restoreSecret(BOT_ID_SECRET_KEY, previousBotId);
+          this.restoreSecret(BOT_SECRET_SECRET_KEY, previousSecret);
+          this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwner);
+          const failed: IMStatus = {
+            kind: "error",
+            reason: SECRET_WRITE_FAILED_REASON,
+          };
+          this.setStatus(failed);
+          return state(failed);
+        }
+        if (botChanged) {
+          this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
+          this.ownerUserId = "";
+        }
+        this.botId = botId;
+        this.connect(botId, secret);
+        return state();
+      }),
+    );
+    this.host.ipc.handle("wecomBot:reconnect", () =>
+      runAccountScoped(async () => {
+        const botId = this.host.secrets.read(BOT_ID_SECRET_KEY)?.trim() ?? "";
+        const secret =
+          this.host.secrets.read(BOT_SECRET_SECRET_KEY)?.trim() ?? "";
+        if (botId && secret) this.connect(botId, secret);
+        return state();
+      }),
+    );
     this.host.ipc.handle("wecomBot:disconnect", async () => {
       this.generation += 1;
       this.client?.disconnect();
@@ -536,17 +552,30 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     await this.emitInbound(frame, client, generation, async () => {
       const video = frame.body?.video;
       if (!video) return unsupportedPayload("video", "视频内容缺失");
+      const cacheMedia = this.host.media?.cacheMedia;
+      if (!cacheMedia) {
+        return unsupportedPayload("video:unsupported", "视频暂不支持");
+      }
       try {
         const downloaded = await client.downloadFile(video.url, video.aeskey);
-        const persisted = await persistWecomDownload({
-          mediaDir: this.mediaDir,
+        const originalName = safeWecomFilename(downloaded.filename, ".mp4");
+        const stored = await cacheMedia({
+          integration: "wecom",
+          token: `${frame.body!.msgid}:video`,
           buffer: downloaded.buffer,
-          filename: downloaded.filename,
-          fallbackExtension: ".mp4",
+          mimeType: mimeTypeForFilename(originalName),
         });
         return {
           text: "",
-          attachments: [{ kind: "file", ...persisted }],
+          attachments: [
+            {
+              kind: "file",
+              absPath: stored.absPath,
+              originalName,
+              mimeType: stored.mimeType,
+              url: stored.url,
+            },
+          ],
           unsupported: [],
         };
       } catch (error) {

@@ -5,6 +5,7 @@ import { decodeWecomLane } from "../codec.js";
 import { WecomIM } from "../index.js";
 
 type Handler = (payload?: unknown) => void;
+type IpcHandler = (payload?: unknown) => Promise<unknown> | unknown;
 
 class FakeClient {
   readonly handlers = new Map<string, Handler[]>();
@@ -56,6 +57,7 @@ function createHost() {
     ["wecom-bot-secret", "secret-1"],
   ]);
   const broadcasts: unknown[] = [];
+  const ipcHandlers = new Map<string, IpcHandler>();
   const host: IMHost = {
     secrets: {
       read: (name) => secrets.get(name) ?? null,
@@ -67,7 +69,7 @@ function createHost() {
       isAvailable: () => true,
     },
     ipc: {
-      handle: vi.fn(),
+      handle: (channel, handler) => void ipcHandlers.set(channel, handler),
       broadcast: (_channel, payload) => broadcasts.push(payload),
     },
     paths: {
@@ -76,7 +78,7 @@ function createHost() {
     },
     httpPostForm: async () => ({ status: 200, body: {} }),
   };
-  return { host, secrets, broadcasts };
+  return { host, secrets, broadcasts, ipcHandlers };
 }
 
 function message(args: {
@@ -99,6 +101,14 @@ function message(args: {
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 describe("WecomIM routing and ownership", () => {
   it("TOFU-binds the first DM sender and only accepts that owner afterwards", async () => {
@@ -286,6 +296,55 @@ describe("WecomIM routing and ownership", () => {
     });
   });
 
+  it.each([
+    {
+      channel: "wecomBot:set-config",
+      payload: { botId: "bot-2", secret: "secret-2" },
+    },
+    { channel: "wecomBot:reconnect", payload: undefined },
+  ])(
+    "does not mutate transport through $channel after the account generation changes",
+    async ({ channel, payload }) => {
+      const { host, secrets, ipcHandlers } = createHost();
+      const gate = deferred<void>();
+      let active = true;
+      let accountToken = 1;
+      const accountRun = vi.fn();
+      host.accountScope = {
+        capture: () => (active ? accountToken : null),
+        isCurrent: (token) => active && token === accountToken,
+        async run<T>(
+          token: unknown,
+          operation: () => Promise<T>,
+        ): Promise<T> {
+          accountRun(token);
+          await gate.promise;
+          if (!active || token !== accountToken) {
+            throw new Error("[IM_NOT_READY] stale account generation");
+          }
+          return operation();
+        },
+      };
+      const clientFactory = vi.fn(() => new FakeClient() as never);
+      const im = new WecomIM(host, { clientFactory });
+      im.registerIpc();
+
+      const invoke = ipcHandlers.get(channel);
+      expect(invoke).toBeDefined();
+      const operation = Promise.resolve(invoke?.(payload));
+      await vi.waitFor(() => expect(accountRun).toHaveBeenCalledWith(1));
+
+      active = false;
+      accountToken += 1;
+      gate.resolve();
+
+      await expect(operation).rejects.toThrow("[IM_NOT_READY]");
+      expect(clientFactory).not.toHaveBeenCalled();
+      expect(secrets.get("wecom-bot-id")).toBe("bot-1");
+      expect(secrets.get("wecom-bot-secret")).toBe("secret-1");
+    },
+  );
+
   it("preserves arrival order when media download is slower than a following text message", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");
@@ -334,5 +393,59 @@ describe("WecomIM routing and ownership", () => {
     await flush();
     await flush();
     expect(received).toEqual(["image", "second"]);
+  });
+
+  it("routes inbound video bytes through the host media ledger", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    client.downloadFile.mockResolvedValueOnce({
+      buffer: Buffer.from("video"),
+      filename: "clip.mp4",
+    });
+    const cacheMedia = vi.fn(async () => ({
+      absPath: "C:\\managed\\clip.mp4",
+      url: `cindy-media://blobs/${"a".repeat(64)}.mp4`,
+      mimeType: "video/mp4",
+    }));
+    host.media = {
+      cacheImage: vi.fn(),
+      cacheMedia,
+      getCachedImage: vi.fn(async () => null),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+
+    await im.init();
+    client.emit("message.video", {
+      body: {
+        msgid: "video-1",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "video",
+        video: { url: "https://example.invalid/video" },
+      },
+    });
+    await flush();
+    await flush();
+
+    expect(cacheMedia).toHaveBeenCalledWith({
+      integration: "wecom",
+      token: "video-1:video",
+      buffer: Buffer.from("video"),
+      mimeType: "video/mp4",
+    });
+    expect(received[0]?.attachments).toEqual([
+      {
+        kind: "file",
+        absPath: "C:\\managed\\clip.mp4",
+        originalName: "clip.mp4",
+        mimeType: "video/mp4",
+        url: `cindy-media://blobs/${"a".repeat(64)}.mp4`,
+      },
+    ]);
   });
 });
