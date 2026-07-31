@@ -183,10 +183,13 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
     return { configured: true, enabled: true, maskedKey: maskWebhookKey(url) };
   }
 
-  async test(testMessage: string): Promise<void> {
+  async test(testMessage: string, isAccountCurrent: () => boolean = () => true): Promise<void> {
     const url = this.requireStoredUrl();
     const message = parseTestMessage(testMessage);
-    await this.enqueue(() => this.send(url, message));
+    await this.enqueue(() => {
+      if (!isAccountCurrent()) throw new ImAccountScopeClosedError();
+      return this.send(url, message);
+    });
   }
 
   clear(): WecomGroupNotificationState {
@@ -263,12 +266,14 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
 export const wecomGroupNotificationService = new WecomGroupNotificationService();
 
 export function initWecomGroupNotificationIpc(): void {
-  const runAccountScopedMutation = <T>(operation: () => T): Promise<T> => {
+  const runAccountScoped = <T>(
+    operation: (accountGeneration: number) => T | Promise<T>,
+  ): Promise<T> => {
     const accountGeneration = captureImAccountGeneration();
     if (accountGeneration === null) {
       return Promise.reject(new ImAccountScopeClosedError());
     }
-    return runInImAccountGeneration(accountGeneration, async () => operation());
+    return runInImAccountGeneration(accountGeneration, async () => operation(accountGeneration));
   };
 
   ipcMain.handle('wecomGroupNotification:get-state', (event) => {
@@ -291,17 +296,21 @@ export function initWecomGroupNotificationIpc(): void {
   );
   ipcMain.handle('wecomGroupNotification:test', async (event, testMessage: unknown) => {
     assertTrustedAppRendererEvent(event);
-    await wecomGroupNotificationService.test(parseTestMessage(testMessage));
-    return { ok: true as const };
+    return runAccountScoped(async (accountGeneration) => {
+      await wecomGroupNotificationService.test(parseTestMessage(testMessage), () =>
+        isImAccountGenerationCurrent(accountGeneration),
+      );
+      return { ok: true as const };
+    });
   });
   ipcMain.handle('wecomGroupNotification:set-enabled', (event, enabled: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
-    return runAccountScopedMutation(() => wecomGroupNotificationService.setEnabled(enabled));
+    return runAccountScoped(() => wecomGroupNotificationService.setEnabled(enabled));
   });
   ipcMain.handle('wecomGroupNotification:clear', (event) => {
     assertTrustedAppRendererEvent(event);
-    return runAccountScopedMutation(() => wecomGroupNotificationService.clear());
+    return runAccountScoped(() => wecomGroupNotificationService.clear());
   });
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ipcMain } from 'electron';
+import { ipcMain, net } from 'electron';
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -148,6 +148,29 @@ describe('WeCom group notification security boundary', () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it('does not send a queued test after the account boundary changes', async () => {
+    let releasePublish: (() => void) | undefined;
+    let current = true;
+    const fetchImpl = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+      return response({ errcode: 0, errmsg: 'ok' });
+    });
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const service = new WecomGroupNotificationService(fetchImpl, createSecrets(url));
+
+    const publish = service.publishMarkdown('automation result');
+    const testing = service.test('Localized test message', () => current);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    current = false;
+    releasePublish?.();
+
+    await expect(publish).resolves.toBeUndefined();
+    await expect(testing).rejects.toThrow('IM account changed');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it('does not persist a webhook when the test call fails', async () => {
     const fetchImpl = vi.fn(async () => response({ errcode: 93000, errmsg: 'invalid' }));
     const secrets = createSecrets();
@@ -255,6 +278,7 @@ describe('WeCom group notification security boundary', () => {
   });
 
   it.each([
+    { channel: 'wecomGroupNotification:test', args: ['Localized test message'] },
     { channel: 'wecomGroupNotification:set-enabled', args: [false] },
     { channel: 'wecomGroupNotification:clear', args: [] },
   ])('rejects $channel when the account generation changes before mutation', async ({
@@ -276,6 +300,7 @@ describe('WeCom group notification security boundary', () => {
     await expect(operation).rejects.toThrow('IM account changed');
     expect(ownerScopedImSecrets.write).not.toHaveBeenCalled();
     expect(ownerScopedImSecrets.remove).not.toHaveBeenCalled();
+    expect(net.fetch).not.toHaveBeenCalled();
   });
 
   it('clears both the webhook and its master switch', () => {

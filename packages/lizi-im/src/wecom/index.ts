@@ -460,6 +460,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       if (!image) return unsupportedPayload("image", "图片内容缺失");
       const attachment = await this.downloadImage(
         client,
+        generation,
         frame.body!.msgid,
         0,
         image,
@@ -489,6 +490,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         if (item.msgtype === "image" && item.image) {
           const attachment = await this.downloadImage(
             client,
+            generation,
             frame.body!.msgid,
             index,
             item.image,
@@ -529,6 +531,9 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       if (!file) return unsupportedPayload("file", "文件内容缺失");
       try {
         const downloaded = await client.downloadFile(file.url, file.aeskey);
+        if (!this.isCurrent(client, generation)) {
+          return unsupportedPayload("file:stale", "文件下载已取消");
+        }
         const persisted = await persistWecomDownload({
           mediaDir: this.mediaDir,
           buffer: downloaded.buffer,
@@ -560,6 +565,9 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       }
       try {
         const downloaded = await client.downloadFile(video.url, video.aeskey);
+        if (!this.isCurrent(client, generation)) {
+          return unsupportedPayload("video:stale", "视频下载已取消");
+        }
         const originalName = safeWecomFilename(downloaded.filename, ".mp4");
         const stored = await cacheMedia({
           integration: "wecom",
@@ -670,6 +678,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
 
   private async downloadImage(
     client: WSClient,
+    generation: number,
     messageId: string,
     index: number,
     image: { url: string; aeskey?: string },
@@ -690,6 +699,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     }
     try {
       const downloaded = await client.downloadFile(image.url, image.aeskey);
+      if (!this.isCurrent(client, generation)) return null;
       const filename = safeWecomFilename(downloaded.filename, ".jpg");
       const mimeType = mimeTypeForFilename(filename);
       if (this.host.media) {

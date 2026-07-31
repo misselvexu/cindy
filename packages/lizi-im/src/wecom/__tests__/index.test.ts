@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { IMHost, IMMessageEvent } from "../../types.js";
@@ -394,6 +400,119 @@ describe("WecomIM routing and ownership", () => {
     await flush();
     await flush();
     expect(received).toEqual(["image", "second"]);
+  });
+
+  it("does not cache an inbound image after the transport generation changes", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const download = deferred<Awaited<ReturnType<FakeClient["downloadFile"]>>>();
+    client.downloadFile.mockImplementationOnce(() => download.promise);
+    const cacheImage = vi.fn(async () => ({
+      absPath: "C:\\managed\\photo.jpg",
+      url: "cindy-media://image",
+    }));
+    host.media = {
+      getCachedImage: vi.fn(async () => null),
+      cacheImage,
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit("message.image", {
+      body: {
+        msgid: "stale-image",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "image",
+        image: { url: "https://example.invalid/image" },
+      },
+    });
+    await vi.waitFor(() => expect(client.downloadFile).toHaveBeenCalledOnce());
+
+    await im.dispose();
+    download.resolve({ buffer: Buffer.from("image"), filename: "photo.jpg" });
+    await flush();
+    await flush();
+
+    expect(cacheImage).not.toHaveBeenCalled();
+  });
+
+  it("does not persist an inbound file after the transport generation changes", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const mediaDir = join(tmpdir(), `cindy-wecom-stale-${randomUUID()}`);
+    host.paths.wecomMediaDir = mediaDir;
+    const client = new FakeClient();
+    const download = deferred<Awaited<ReturnType<FakeClient["downloadFile"]>>>();
+    client.downloadFile.mockImplementationOnce(() => download.promise);
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    try {
+      await im.init();
+      client.emit("message.file", {
+        body: {
+          msgid: "stale-file",
+          aibotid: "bot-1",
+          chattype: "single",
+          from: { userid: "owner" },
+          msgtype: "file",
+          file: { url: "https://example.invalid/file" },
+        },
+      });
+      await vi.waitFor(() => expect(client.downloadFile).toHaveBeenCalledOnce());
+
+      await im.dispose();
+      download.resolve({ buffer: Buffer.from("file"), filename: "report.txt" });
+      await flush();
+      await flush();
+
+      expect(existsSync(mediaDir)).toBe(false);
+    } finally {
+      await rm(mediaDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache an inbound video after the transport generation changes", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const download = deferred<Awaited<ReturnType<FakeClient["downloadFile"]>>>();
+    client.downloadFile.mockImplementationOnce(() => download.promise);
+    const cacheMedia = vi.fn(async () => ({
+      absPath: "C:\\managed\\clip.mp4",
+      url: `cindy-media://blobs/${"a".repeat(64)}.mp4`,
+      mimeType: "video/mp4",
+    }));
+    host.media = {
+      cacheImage: vi.fn(),
+      cacheMedia,
+      getCachedImage: vi.fn(async () => null),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit("message.video", {
+      body: {
+        msgid: "stale-video",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "video",
+        video: { url: "https://example.invalid/video" },
+      },
+    });
+    await vi.waitFor(() => expect(client.downloadFile).toHaveBeenCalledOnce());
+
+    await im.dispose();
+    download.resolve({ buffer: Buffer.from("video"), filename: "clip.mp4" });
+    await flush();
+    await flush();
+
+    expect(cacheMedia).not.toHaveBeenCalled();
   });
 
   it("routes inbound video bytes through the host media ledger", async () => {
