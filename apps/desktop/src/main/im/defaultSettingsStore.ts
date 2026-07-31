@@ -76,6 +76,20 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
   };
 }
 
+function normalizeChannelSettings(
+  channel: ImDefaultSettingsChannel,
+  raw: unknown,
+): ImDefaultSettings {
+  const settings = normalizeSettings(raw);
+  if (!isRemoteImUnsupportedPermissionMode(channel, settings.permissionMode)) {
+    return settings;
+  }
+  return {
+    ...settings,
+    permissionMode: IM_DEFAULT_SETTINGS.permissionMode,
+  };
+}
+
 function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   const record = isRecord(raw) ? raw : {};
 
@@ -122,7 +136,10 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       global: cloneSettings(legacy),
       channels: Object.fromEntries(
-        IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [channel, cloneSettings(legacy)]),
+        IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
+          channel,
+          normalizeChannelSettings(channel, legacy),
+        ]),
       ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
     };
   }
@@ -134,7 +151,7 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
     channels: Object.fromEntries(
       IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
         channel,
-        normalizeSettings(rawChannels[channel]),
+        normalizeChannelSettings(channel, rawChannels[channel]),
       ]),
     ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
   };

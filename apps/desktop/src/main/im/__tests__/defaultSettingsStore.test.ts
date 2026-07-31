@@ -199,6 +199,32 @@ describe('im default settings store', () => {
     expect(migrated.channels.wechat).toEqual(migrated.global);
   });
 
+  it.each(['acceptEdits', 'bypassPermissions'] as const)(
+    'clamps legacy and persisted restricted-channel %s permission defaults',
+    (permissionMode) => {
+      const migrated = __testing.normalizeDocument({
+        ...IM_DEFAULT_SETTINGS,
+        permissionMode,
+      });
+
+      expect(migrated.global.permissionMode).toBe(permissionMode);
+      expect(migrated.channels.feishu.permissionMode).toBe(permissionMode);
+      expect(migrated.channels.wechat.permissionMode).toBe('auto');
+      expect(migrated.channels.wecom.permissionMode).toBe('auto');
+
+      const persisted = __testing.normalizeDocument({
+        schemaVersion: 3,
+        global: IM_DEFAULT_SETTINGS,
+        channels: {
+          wechat: { ...IM_DEFAULT_SETTINGS, permissionMode },
+          wecom: { ...IM_DEFAULT_SETTINGS, permissionMode },
+        },
+      });
+      expect(persisted.channels.wechat.permissionMode).toBe('auto');
+      expect(persisted.channels.wecom.permissionMode).toBe('auto');
+    },
+  );
+
   it('migrates v2 documents to auto permission and seeds an independent WeChat route', () => {
     const withoutPermission = {
       agentKind: IM_DEFAULT_SETTINGS.agentKind,
