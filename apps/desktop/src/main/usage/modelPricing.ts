@@ -77,6 +77,34 @@ let lastPricedAtScope: string | null = null;
  * 而 24h 足以覆盖一次服务端故障窗口。超龄后钱不记、token 回退仍在。
  */
 const RETAINED_PRICING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * 当前处于「网关不下发价格」故障态的 scope。
+ *
+ * 「沿用最后已知报价」这件事有三条路径:内存 → 内存(retainKnownGatewayQuotes)、
+ * 内存 → 磁盘(writeDiskCache 的 preserveDiskQuotes)、磁盘 → 内存(hydrateFromDisk)。
+ * 前几轮是逐条打补丁,结果每补一处就在另一处漏一次(最后一次是冷启动 hydrate 恢复出
+ * approximate:false 的报价,按精确账单金额展示)。这里把它收成一个显式状态:
+ * **只要 scope 处于故障态,对外给出的报价一律经 asApproximateQuotes 投影**,
+ * 无论它来自内存还是刚从磁盘读回来。磁盘上则永远只存精确快照。
+ */
+let unpricedFailureScope: string | null = null;
+
+/**
+ * 把精确报价投影成「按最后已知价折算」的工作副本。
+ *
+ * approximate 是下游唯一的降级信号源:computePriceQuoteTurnMoney 据此给
+ * estimateReasons:['reference-price'],两端 UI 再据此加 ~ 前缀与来源说明。
+ * 标记只在这一处做 —— 三条沿用路径共用它,不再各写一份。
+ */
+function asApproximateQuotes(pricing: ModelPricingCatalog): ModelPricingCatalog {
+  const xd = pricing.xd;
+  if (!xd) return pricing;
+  const next: Record<string, ModelPriceQuote> = {};
+  for (const [modelId, quote] of Object.entries(xd)) {
+    next[modelId] = quote.approximate ? quote : { ...quote, approximate: true };
+  }
+  return { xd: next };
+}
 const hydratedScopes = new Set<string>();
 const hydrateInflightByScope = new Map<string, Promise<ModelPricingCatalog | null>>();
 
@@ -219,21 +247,22 @@ async function writeDiskCache(
 ): Promise<void> {
   try {
     const file = diskCachePath();
-    let effectivePricing = pricing;
-    let effectiveFetchedAt = fetchedAt;
-    if (preserveDiskQuotes) {
-      const existing = await readValidDiskPayload(scope);
-      if (existing) {
-        effectivePricing = existing.pricing;
-        effectiveFetchedAt = existing.fetchedAt;
-      }
+    if (preserveDiskQuotes && (await readValidDiskPayload(scope))) {
+      // 磁盘上已有一份精确快照:整份原样留下,一个字段都不动。
+      //
+      // 曾经的写法是「取回磁盘的 pricing + fetchedAt,配上本次新推导的 accountCurrency」
+      // —— 那会把两个不同快照的字段拼在一起:无价响应省略 currency 时新币种按构建区域
+      // 推导,于是磁盘上出现「USD 报价 + CNY 账本币种」,下次 hydrate 恢复出自相矛盾的
+      // 状态,金额被账本守卫整批丢弃;还绕过了内存 retained 分支的币种一致校验 (a-3)。
+      // 报价、币种、年龄基准三者必须同源,所以要么整份换、要么整份留。
+      return;
     }
     await fs.mkdir(path.dirname(file), { recursive: true });
     const payload: DiskCachePayload = {
       version: DISK_CACHE_VERSION,
       scope,
-      fetchedAt: effectiveFetchedAt,
-      pricing: effectivePricing,
+      fetchedAt,
+      pricing,
       accountCurrency,
     };
     await fs.writeFile(file, JSON.stringify(payload), 'utf8');
@@ -265,9 +294,15 @@ async function hydrateFromDisk(scope: string): Promise<ModelPricingCatalog | nul
       ) {
         return null;
       }
-      const pricing = validateCatalog(raw.pricing);
-      if (!pricing) return null;
+      const precise = validateCatalog(raw.pricing);
+      if (!precise) return null;
       if (currentScope() !== scope) return null;
+      // 磁盘上存的一律是精确快照(validateQuote 要求 approximate === false),但如果本
+      // scope 当前正处于「网关不下发价格」故障态,把它当**工作副本**用就等于「按最后
+      // 已知价折算」—— 必须与内存 retained 路径同款标近似,否则冷启动那一轮之后的计费
+      // 会以精确账单金额呈现(无 ~ 前缀、无来源说明)。磁盘本身不因此被改写。
+      const pricing =
+        unpricedFailureScope === scope ? asApproximateQuotes(precise) : precise;
       cache = pricing;
       cacheScope = scope;
       cacheAt = Number(raw.fetchedAt);
@@ -390,11 +425,10 @@ function retainKnownGatewayQuotes(
     if (!modelId) continue;
     const quote = previous[modelId];
     if (!quote) continue;
-    xd[modelId] = quote.approximate
-      ? quote
-      : { ...quote, approximate: true };
+    xd[modelId] = quote;
   }
-  return Object.keys(xd).length > 0 ? { xd } : null;
+  // 标近似统一交给 asApproximateQuotes(三条沿用路径共用同一处实现)。
+  return Object.keys(xd).length > 0 ? asApproximateQuotes({ xd }) : null;
 }
 
 /**
@@ -452,6 +486,13 @@ export function replaceGatewayModelPricing(
   // 同理照常落盘。
   const isUnpricedFailure =
     models.length > 0 && !fetched.xd && !models.some(declaresGatewayTokenPrice);
+  // 故障态是个显式状态:hydrateFromDisk 也要据它决定「磁盘快照当工作副本时是否标近似」。
+  // 目录恢复正常(或换 scope / 登出)时立刻清掉,否则会一直把精确报价说成近似。
+  if (isUnpricedFailure) {
+    unpricedFailureScope = scope;
+  } else if (unpricedFailureScope === scope) {
+    unpricedFailureScope = null;
+  }
   // 故障轮不标 hydrated:冷启动时 /models 可能早于 prewarm 返回无价目录,此时 cacheScope
   // 还没指向本账号 → retained 必然拿不到旧报价。若在这里标成已 hydrate,迟到的 prewarm
   // 会被 getModelPricing / hydrateFromDisk 的短路挡住,永远读不回磁盘上那份精确快照
@@ -585,6 +626,7 @@ export function __resetModelPricingCacheForTesting(): void {
   gatewayAccountCurrencyScope = null;
   lastPricedAt = 0;
   lastPricedAtScope = null;
+  unpricedFailureScope = null;
   hydratedScopes.clear();
   hydrateInflightByScope.clear();
 }

@@ -432,10 +432,62 @@ describe('gateway model pricing projection', () => {
     // 也不能把该 scope 标成已 hydrate —— 否则迟到的 prewarm 会被短路挡住,
     // 永远读不回磁盘上最后一份精确报价。
     const hydrated = await getModelPricing();
-    expect(hydrated?.xd?.['cold-start']).toMatchObject({
-      approximate: false,
-      inputPerMtok: 3,
+    expect(hydrated?.xd?.['cold-start']).toMatchObject({ inputPerMtok: 3 });
+    // 但它是在「网关不下发价格」故障态下被当作工作副本使用的,必须与内存 retained
+    // 路径同款标近似 —— 否则后续计费会以精确账单金额呈现(无 ~ 前缀、无来源说明)。
+    expect(hydrated?.xd?.['cold-start']?.approximate).toBe(true);
+    // 磁盘本身仍是精确快照,没被这次投影改写。
+    const stillPrecise = JSON.parse(
+      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
+    );
+    expect(stillPrecise.pricing.xd['cold-start'].approximate).toBe(false);
+  });
+
+  it('recovers a precise snapshot as-is once the catalog carries prices again', async () => {
+    replaceGatewayModelPricing([
+      { id: 'recovered', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+    await vi.waitFor(async () => {
+      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8');
     });
+
+    // 先进入故障态,再让目录恢复正常 —— 故障标记必须被清掉,
+    // 否则之后从磁盘恢复的精确报价会被一直说成近似。
+    replaceGatewayModelPricing([{ id: 'recovered' }]);
+    replaceGatewayModelPricing([
+      { id: 'recovered', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+
+    __resetModelPricingCacheForTesting();
+    const hydrated = await getModelPricing();
+    expect(hydrated?.xd?.recovered?.approximate).toBe(false);
+  });
+
+  it('keeps the preserved disk snapshot internally consistent (quotes + currency + age)', async () => {
+    __resetActiveLedgerCurrencyForTesting();
+    const accountCurrency = EXPECTED_GATEWAY_CURRENCY === 'USD' ? 'CNY' : 'USD';
+    replaceGatewayModelPricing([
+      {
+        id: 'consistent',
+        currency: accountCurrency,
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+    const before = await vi.waitFor(async () =>
+      JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8')),
+    );
+    expect(before.accountCurrency).toBe(accountCurrency);
+
+    // 无价响应通常省略 currency。此前的写法会把「磁盘的 pricing + 本次按构建区域推导的
+    // accountCurrency」拼在一起写盘,于是磁盘上出现「旧币种报价 + 新币种账本」这种自相
+    // 矛盾的组合,下次 hydrate 出来的金额会被账本守卫整批丢弃。整份保留才对。
+    replaceGatewayModelPricing([{ id: 'consistent' }]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const after = JSON.parse(
+      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
+    );
+    expect(after).toEqual(before);
   });
 
   it('leaves the last precise disk snapshot intact on retained rounds', async () => {
