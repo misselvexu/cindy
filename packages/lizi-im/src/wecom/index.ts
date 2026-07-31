@@ -205,22 +205,24 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         return state();
       }),
     );
-    this.host.ipc.handle("wecomBot:disconnect", async () => {
-      this.generation += 1;
-      this.client?.disconnect();
-      this.client = null;
-      this.pendingFrames.clear();
-      this.pendingResponses.clear();
-      this.inboundTails.clear();
-      this.seenMessageIds.clear();
-      this.host.secrets.remove(BOT_ID_SECRET_KEY);
-      this.host.secrets.remove(BOT_SECRET_SECRET_KEY);
-      this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
-      this.botId = "";
-      this.ownerUserId = "";
-      this.setStatus({ kind: "idle" });
-      return state();
-    });
+    this.host.ipc.handle("wecomBot:disconnect", () =>
+      runAccountScoped(async () => {
+        this.generation += 1;
+        this.client?.disconnect();
+        this.client = null;
+        this.pendingFrames.clear();
+        this.pendingResponses.clear();
+        this.inboundTails.clear();
+        this.seenMessageIds.clear();
+        this.host.secrets.remove(BOT_ID_SECRET_KEY);
+        this.host.secrets.remove(BOT_SECRET_SECRET_KEY);
+        this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
+        this.botId = "";
+        this.ownerUserId = "";
+        this.setStatus({ kind: "idle" });
+        return state();
+      }),
+    );
   }
 
   onMessage(handler: MessageHandler): () => void {

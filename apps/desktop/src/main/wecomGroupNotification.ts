@@ -263,6 +263,14 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
 export const wecomGroupNotificationService = new WecomGroupNotificationService();
 
 export function initWecomGroupNotificationIpc(): void {
+  const runAccountScopedMutation = <T>(operation: () => T): Promise<T> => {
+    const accountGeneration = captureImAccountGeneration();
+    if (accountGeneration === null) {
+      return Promise.reject(new ImAccountScopeClosedError());
+    }
+    return runInImAccountGeneration(accountGeneration, async () => operation());
+  };
+
   ipcMain.handle('wecomGroupNotification:get-state', (event) => {
     assertTrustedAppRendererEvent(event);
     return wecomGroupNotificationService.getState();
@@ -289,11 +297,11 @@ export function initWecomGroupNotificationIpc(): void {
   ipcMain.handle('wecomGroupNotification:set-enabled', (event, enabled: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
-    return wecomGroupNotificationService.setEnabled(enabled);
+    return runAccountScopedMutation(() => wecomGroupNotificationService.setEnabled(enabled));
   });
   ipcMain.handle('wecomGroupNotification:clear', (event) => {
     assertTrustedAppRendererEvent(event);
-    return wecomGroupNotificationService.clear();
+    return runAccountScopedMutation(() => wecomGroupNotificationService.clear());
   });
 }
 

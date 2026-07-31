@@ -258,7 +258,7 @@ export function buildMobileScheduleInput(draft: MobileScheduleDraft): RemoteSche
     notify: {
       desktop: draft.notifyDesktop,
       feishu: draft.notifyFeishu,
-      ...(draft.notifyWecomGroup === true ? { wecomGroup: true } : {}),
+      wecomGroup: draft.notifyWecomGroup === true,
     },
   };
 

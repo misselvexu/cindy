@@ -302,6 +302,7 @@ describe("WecomIM routing and ownership", () => {
       payload: { botId: "bot-2", secret: "secret-2" },
     },
     { channel: "wecomBot:reconnect", payload: undefined },
+    { channel: "wecomBot:disconnect", payload: undefined },
   ])(
     "does not mutate transport through $channel after the account generation changes",
     async ({ channel, payload }) => {

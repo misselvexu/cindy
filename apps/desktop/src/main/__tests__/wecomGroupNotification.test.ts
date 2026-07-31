@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ipcMain } from 'electron';
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -20,7 +21,12 @@ vi.mock('../security/trustedAppRenderer', () => ({
   assertTrustedAppRendererEvent: vi.fn(),
 }));
 
-import { WecomGroupNotificationService, __testing } from '../wecomGroupNotification';
+import {
+  initWecomGroupNotificationIpc,
+  WecomGroupNotificationService,
+  __testing,
+} from '../wecomGroupNotification';
+import { ownerScopedImSecrets } from '../im/ownerScopedStorage';
 import { activateImAccountBoundary, deactivateImAccountBoundary } from '../im/accountBoundary';
 
 function response(body: unknown, status = 200): Response {
@@ -246,6 +252,30 @@ describe('WeCom group notification security boundary', () => {
     await expect(second).rejects.toThrow('IM account changed');
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledWith(firstUrl, expect.any(Object));
+  });
+
+  it.each([
+    { channel: 'wecomGroupNotification:set-enabled', args: [false] },
+    { channel: 'wecomGroupNotification:clear', args: [] },
+  ])('rejects $channel when the account generation changes before mutation', async ({
+    channel,
+    args,
+  }) => {
+    type RegisteredHandler = (event: unknown, ...args: unknown[]) => unknown;
+    const handlers = new Map<string, RegisteredHandler>();
+    vi.mocked(ipcMain.handle).mockImplementation((registeredChannel, handler) => {
+      handlers.set(registeredChannel, handler as RegisteredHandler);
+    });
+    initWecomGroupNotificationIpc();
+
+    const handler = handlers.get(channel);
+    expect(handler).toBeDefined();
+    const operation = Promise.resolve(handler?.({}, ...args));
+    deactivateImAccountBoundary();
+
+    await expect(operation).rejects.toThrow('IM account changed');
+    expect(ownerScopedImSecrets.write).not.toHaveBeenCalled();
+    expect(ownerScopedImSecrets.remove).not.toHaveBeenCalled();
   });
 
   it('clears both the webhook and its master switch', () => {
