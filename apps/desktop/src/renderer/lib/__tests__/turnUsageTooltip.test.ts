@@ -136,6 +136,50 @@ describe('buildTurnUsageTooltipLines — 建议行 (只在真正有价值时出�
   });
 });
 
+describe('buildTurnUsageTooltipLines — 无金额 (token 回退) tooltip', () => {
+  const details = buildTurnUsageDetails({
+    inputTokens: 12_400,
+    outputTokens: 8_900,
+    cacheReadTokens: 2_000_000,
+    cacheCreateTokens: 86_400,
+    model: 'claude-opus-5',
+  })!;
+
+  it('不传 money/costUsd → 跳过费用行, 保留 token / 缓存 / 模型行', () => {
+    const out = buildTurnUsageTooltipLines({ details, t });
+    expect(out.some((l) => l.startsWith('usageDetails.costLine'))).toBe(false);
+    expect(out.some((l) => l.startsWith('usageDetails.valueLine'))).toBe(false);
+    expect(out.some((l) => l.startsWith('usageDetails.tokenLine'))).toBe(true);
+    expect(out.some((l) => l.startsWith('usageDetails.cacheLine'))).toBe(true);
+    expect(out.some((l) => l.startsWith('usageDetails.modelLine'))).toBe(true);
+  });
+
+  it('无金额 → 末尾追加「取不到报价」说明, 避免被读成"这轮不花钱"', () => {
+    const out = buildTurnUsageTooltipLines({ details, t });
+    expect(out[out.length - 1]).toBe('usageDetails.priceUnavailable');
+  });
+
+  it('有金额 → 不出现该说明行', () => {
+    expect(
+      buildTurnUsageTooltipLines({ details, t, costUsd: 0.42 }),
+    ).not.toContain('usageDetails.priceUnavailable');
+    expect(
+      buildTurnUsageTooltipLines({
+        details,
+        t,
+        money: { amount: 3.5, currency: 'CNY', approximate: false, kind: 'actual-cost' },
+      }),
+    ).not.toContain('usageDetails.priceUnavailable');
+  });
+
+  it('金额为 0 / 负 → 视同无金额, 仍给说明行 (绝不显示 $0.00 当事实)', () => {
+    const zero = buildTurnUsageTooltipLines({ details, t, costUsd: 0 });
+    expect(zero).toContain('usageDetails.priceUnavailable');
+    const negative = buildTurnUsageTooltipLines({ details, t, costUsd: -1 });
+    expect(negative).toContain('usageDetails.priceUnavailable');
+  });
+});
+
 describe('normalizeTurnUsageDetails — perModelCost 往返 / 清洗', () => {
   it('合法数组往返, 过滤空 model / cost<=0', () => {
     const d = normalizeTurnUsageDetails({

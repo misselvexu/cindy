@@ -112,5 +112,10 @@ export function buildTurnUsageTooltipLines({
   if (suggestionText) {
     lines.push(t('usageDetails.suggestionLine', { suggestion: suggestionText }));
   }
+  // 没有金额时明说原因 —— 否则「只有 token、没有钱」会被读成"这轮不花钱"。
+  // 与建议行同属尾部附注区:主体先给事实,解释放最后。
+  if (!formattedCost) {
+    lines.push(t('usageDetails.priceUnavailable'));
+  }
   return lines;
 }

@@ -265,8 +265,45 @@ function broadcastPricing(pricing: ModelPricingCatalog | null): void {
 }
 
 /**
+ * 目录整体不带价格时,保留上一份快照里**仍出现在本次清单**的报价。
+ *
+ * 为什么需要:目录一次不下发价格字段,整条计费链就静默归零 —— 报价为空 →
+ * 算不出 turnMoney → 日账本 / 按模型统计 / 消息费用全为 0,而 token 照记。
+ * 实例:2026-07-30 傍晚起目录 67 个模型全部不带 inputCostPerToken,客户端一整天
+ * 几百万 token 一分钱没记,日志里也无任何异常(覆盖率告警的条件是
+ * quoteCount < pricedCount,0 < 0 不成立)。
+ *
+ * 边界:
+ * - 按本次清单过滤 → 已下架模型的旧价不复活(保住原有「不复活旧模型价格」的本意);
+ * - scope 不同(换号 / 换区 / 换 key)不复用,旧账号的价格不外溢;
+ * - 保留的 quote 标 approximate + reference-price → 金额仍进账本(用量真实发生过,
+ *   记 0 才是确定性错误),但明确标注为按最后已知价折算,不谎称与账单精确一致。
+ */
+function retainKnownGatewayQuotes(
+  models: readonly ModelAccessGatewayModel[],
+  scope: string,
+): ModelPricingCatalog | null {
+  if (models.length === 0) return null;
+  if (cacheScope !== scope) return null;
+  const previous = cache?.xd;
+  if (!previous) return null;
+  const xd: Record<string, ModelPriceQuote> = {};
+  for (const model of models) {
+    const modelId = model.id.trim();
+    if (!modelId) continue;
+    const quote = previous[modelId];
+    if (!quote) continue;
+    xd[modelId] = quote.approximate
+      ? quote
+      : { ...quote, approximate: true };
+  }
+  return Object.keys(xd).length > 0 ? { xd } : null;
+}
+
+/**
  * 与模型同步同快照更新 XD quote。models 非空但没有标准 input/output 价格时，
- * 价格投影会被清空，不复活旧模型价格。
+ * 回落到上一份快照里仍在清单内的报价(见 retainKnownGatewayQuotes);连旧报价也
+ * 没有(冷启动首次同步就无价)时价格投影为空。
  */
 export function replaceGatewayModelPricing(
   models: readonly ModelAccessGatewayModel[],
@@ -277,7 +314,16 @@ export function replaceGatewayModelPricing(
   // therefore passes the authenticated user captured when the request starts,
   // so a valid startup snapshot is never persisted under `anonymous`.
   const scope = currentScope(authenticatedUserId);
-  const pricing = gatewayPricingCatalog(models, CURRENT_CINDY_REGION);
+  let pricing = gatewayPricingCatalog(models, CURRENT_CINDY_REGION);
+  if (!pricing.xd) {
+    const retained = retainKnownGatewayQuotes(models, scope);
+    if (retained) {
+      log.warn(
+        `xd gateway models returned no prices; retained ${Object.keys(retained.xd ?? {}).length} quote(s) from the last snapshot (marked approximate)`,
+      );
+      pricing = retained;
+    }
+  }
   cache = pricing;
   cacheScope = scope;
   cacheAt = Date.now();

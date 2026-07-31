@@ -167,6 +167,14 @@ function applyGatewayModels(
     log.warn(
       `xd gateway pricing quotes cover ${quoteCount}/${pricedCount} priced models (${models.length} total)`,
     );
+  } else if (pricedCount === 0 && models.length > 0) {
+    // 上面那条覆盖率告警的条件是 quoteCount < pricedCount,「整个目录一个价都没有」
+    // 恰好是 0 < 0 → 不成立 → 全程静默。而这正是最该报的情形:计费链会整条归零
+    // (2026-07-30 现场:67 个模型全部不带 inputCostPerToken,一整天没记一分钱,
+    // 日志里一个字都没有)。分开一条日志,把「有几条旧报价被保留」也带上,现场可判。
+    log.warn(
+      `xd gateway models carry no prices at all (${models.length} models); billing falls back to ${quoteCount} retained quote(s)`,
+    );
   }
   // dev:本地目录文件(catalog/providers.json)的 cindyModelMeta 段覆盖服务端下发的
   // 元数据,改本地 json + 重启即可自测,无需发 OSS / 等服务端热加载;只覆盖同 id,

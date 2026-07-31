@@ -7,6 +7,13 @@
  * { turnCostUsd, turnCostIsEstimate } patch 进 messages.agent_meta(免 migration,
  * 历史会话重开也能显示),落库成功后广播给所有窗口刷新 MessageActionBar。
  *
+ * 算不出金额的轮次走 recordTurnUsageOnMessage:只落 turnUsageDetails,让 UI 退回
+ * 显示本轮 token。没有报价的成因很多(网关目录整体不下发价格、模型不在价表、
+ * 订阅轮估值也 miss),但对用户来说"这一格空着"都是同一种坏体验 —— 钱算不出来
+ * 不代表用量算不出来,token 明细在这些路径上本就已经算好,只是此前被丢掉了。
+ * 该路径不碰任何账本字段(daily_spend / sessions.total_cost_usd / turnCost),
+ * 没有钱就不记账。
+ *
  * 写库经 messagePersistBroadcaster 的 enqueueDurableWrite 串行 FIFO:该消息的
  * createMessage 在 done 同步路径已入队,patch 后入队 → 顺序天然正确(Codex 异步
  * 折算晚到也成立)。先落库后广播,保证多窗口 / 后开窗口(走历史加载读 agent_meta)
@@ -40,18 +47,23 @@ const log = createLogger('turnCostBroadcaster');
 /** IPC channel: main → renderer 推单条消息的 per-turn 费用。 */
 export const MESSAGE_TURN_COST_CHANGED = 'usage:message-turn-cost';
 
+/**
+ * 金额字段整组可选:无报价轮(recordTurnUsageOnMessage)只带 turnUsageDetails,
+ * 消费方据此退回 token 展示。有金额的轮次这些字段一定成组出现,不存在只有
+ * turnMoney 没有 userTurnMoney 的中间态。
+ */
 export interface MessageTurnCostPayload {
   sessionId: string;
   /** 该轮最后一条 assistant 的 messages.client_id。 */
   clientId: string;
-  turnMoney: RegionalMoney;
+  turnMoney?: RegionalMoney;
   turnCostUsd?: number;
-  turnCostIsEstimate: boolean;
+  turnCostIsEstimate?: boolean;
   /** User-visible cumulative cost from the latest real user prompt through this message. */
-  userTurnMoney: RegionalMoney;
+  userTurnMoney?: RegionalMoney;
   userTurnCostUsd?: number;
   /** True when any segment in userTurnCostUsd is a subscription-value estimate. */
-  userTurnCostIsEstimate: boolean;
+  userTurnCostIsEstimate?: boolean;
   /** 本轮 token/cache 明细;旧消息或取不到 usage 时缺省。 */
   turnUsageDetails?: TurnUsageDetails;
 }
@@ -182,6 +194,53 @@ export async function recordTurnCostOnMessage(
     return true;
   } catch (err) {
     log.warn('recordTurnCostOnMessage failed:', err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+/** 无金额路径只需要落库 + 广播两件事,不读往轮累计、不动 scheduler 账本。 */
+export type TurnUsageDeps = Pick<TurnCostDeps, 'patchAgentMeta' | 'enqueue' | 'broadcast'>;
+
+/**
+ * 算不出金额时,只把本轮 token 明细挂到该轮最后一条 assistant 上。
+ *
+ * 与 recordTurnCostOnMessage 的区别就是"不碰钱":不写 turnCost / turnCostUsd /
+ * userTurnCost,也不调 applyScheduleRunCostChange —— 账本只接受真实计费,这里
+ * 提供的是用量事实。已经有金额的消息不会走到这里(register 侧是 if/else),即便
+ * 走到也只会 merge 进 turnUsageDetails 一个字段,不覆盖既有金额。
+ *
+ * turnUsageDetails 为空(整轮 0 token)时直接跳过:没有可展示的事实,不写空对象。
+ */
+export async function recordTurnUsageOnMessage(
+  args: {
+    sessionId: string;
+    clientId: string;
+    turnUsageDetails?: TurnUsageDetails | null;
+  },
+  deps: TurnUsageDeps = defaultDeps,
+): Promise<boolean> {
+  const { sessionId, clientId, turnUsageDetails } = args;
+  if (!sessionId || !clientId || !turnUsageDetails) return false;
+  try {
+    const patched = await deps.enqueue(`turn-usage:${sessionId}:${clientId}`, () =>
+      deps.patchAgentMeta(sessionId, clientId, { turnUsageDetails }),
+    );
+    if (!patched) return false;
+    try {
+      deps.broadcast({ sessionId, clientId, turnUsageDetails });
+    } catch (err) {
+      // 明细已落库,后开窗口走历史加载仍能读到;广播失败不影响持久事实。
+      log.warn(
+        'recordTurnUsageOnMessage broadcast failed:',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    return true;
+  } catch (err) {
+    log.warn(
+      'recordTurnUsageOnMessage failed:',
+      err instanceof Error ? err.message : String(err),
+    );
     return false;
   }
 }

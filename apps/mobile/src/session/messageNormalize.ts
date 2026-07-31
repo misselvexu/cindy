@@ -79,6 +79,11 @@ export interface NormalizedRemoteMessage {
   /** 旧 Desktop 消息兼容字段。 */
   turnCostUsd?: number;
   turnCostIsEstimate?: boolean;
+  /**
+   * 本轮 token 总量(agentMeta.turnUsageDetails.totalTokens)。桌面算不出模型报价时
+   * 只落这一份用量事实,操作行据此退回显示 token 而不是空着一格。
+   */
+  turnTotalTokens?: number;
   /** assistant 专用:本轮模型降级标记(agentMeta.modelMismatch,桌面 main 在 turn 结束检测命中时落库)。 */
   modelMismatch?: { selected: string; actual: string };
   /** Orca 协同卡片(Lead 派活 / worker 回报);存在时由 MessageRenderer 渲染成专属卡片而非普通气泡。 */
@@ -375,7 +380,9 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
       isStreaming: readMessageStreaming(message) || undefined,
       ...(message.role === 'assistant' && (
         message.agentMeta?.turnCompleted === true ||
-        (turnCost.turnMoney?.amount ?? 0) > 0
+        (turnCost.turnMoney?.amount ?? 0) > 0 ||
+        // 无报价轮只落 turnUsageDetails,它同样只在 turn 结束时写入,等价收尾信号。
+        turnCost.turnTotalTokens !== undefined
       )
         ? { turnCompleted: true }
         : {}),
@@ -692,20 +699,29 @@ function readTimestamp(value: unknown): number | null {
 
 function readTurnCost(
   message: RemoteMessage,
-): Pick<NormalizedRemoteMessage, 'turnMoney' | 'turnCostUsd' | 'turnCostIsEstimate'> {
+): Pick<
+  NormalizedRemoteMessage,
+  'turnMoney' | 'turnCostUsd' | 'turnCostIsEstimate' | 'turnTotalTokens'
+> {
   if (message.role !== 'assistant') return {};
+  // 用量与金额分开读:桌面算不出报价的轮次只落 turnUsageDetails,操作行退回显示 token。
+  const totalTokens = readNumber(readRecord(message.agentMeta?.turnUsageDetails)?.totalTokens);
+  const usage: Pick<NormalizedRemoteMessage, 'turnTotalTokens'> =
+    totalTokens !== null && totalTokens > 0 ? { turnTotalTokens: totalTokens } : {};
   const money = normalizeRemoteMoney(message.agentMeta?.turnCost);
   if (money && money.amount > 0) {
     return {
+      ...usage,
       turnMoney: money,
       ...(money.currency === 'USD' ? { turnCostUsd: money.amount } : {}),
       turnCostIsEstimate: money.kind === 'value-estimate',
     };
   }
   const cost = readNumber(message.agentMeta?.turnCostUsd);
-  if (cost === null || cost <= 0) return {};
+  if (cost === null || cost <= 0) return usage;
   const isEstimate = message.agentMeta?.turnCostIsEstimate === true;
   return {
+    ...usage,
     turnMoney: {
       amount: cost,
       currency: 'USD',

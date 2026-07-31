@@ -195,7 +195,7 @@ describe('gateway model pricing projection', () => {
     expect(Object.keys(pricing?.xd ?? {})).toEqual(['free-output']);
   });
 
-  it('successful empty or unpriced snapshots clear the old quote instead of reviving it', async () => {
+  it('never revives quotes for models that left the catalog', async () => {
     replaceGatewayModelPricing([
       {
         id: 'priced',
@@ -205,12 +205,56 @@ describe('gateway model pricing projection', () => {
     ]);
     expect(await getModelPricing()).not.toBeNull();
 
+    // 'priced' 已不在本次清单里 → 它的旧报价不得复活(下架模型继续计费是错的)。
     expect(replaceGatewayModelPricing([{ id: 'unpriced' }])).toEqual({});
     expect(await getModelPricing()).toEqual({});
     expect(mocks.send).toHaveBeenLastCalledWith(MODEL_PRICING_CHANGED_CHANNEL, {});
 
     clearGatewayModelPricing();
     expect(await getModelPricing()).toEqual({});
+  });
+
+  it('retains last known quotes for models still listed when the catalog drops all prices', async () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'still-listed',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+      {
+        id: 'dropped-later',
+        inputCostPerToken: 0.000001,
+        outputCostPerToken: 0.000002,
+      },
+    ]);
+
+    // 目录仍返回模型、但整体不带价格字段(2026-07-30 现场)。仍在清单里的条目沿用
+    // 最后已知报价,并标 approximate;这一轮不在清单的 'dropped-later' 一并消失。
+    const retained = replaceGatewayModelPricing([{ id: 'still-listed' }]);
+    expect(Object.keys(retained.xd ?? {})).toEqual(['still-listed']);
+    expect(retained.xd?.['still-listed']).toMatchObject({
+      providerId: 'xd',
+      modelId: 'still-listed',
+      source: 'gateway',
+      approximate: true,
+      inputPerMtok: 3,
+      outputPerMtok: 15,
+    });
+    expect(await getModelPricing()).toEqual(retained);
+  });
+
+  it('does not carry retained quotes across accounts', async () => {
+    replaceGatewayModelPricing([
+      {
+        id: 'shared-id',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+
+    // 换账号(scope 变化)后目录无价:上一个账号的报价不得外溢到新账号。
+    mocks.getCurrentDbClientUserId.mockReturnValue('user-b');
+    expect(replaceGatewayModelPricing([{ id: 'shared-id' }], 'user-b')).toEqual({});
   });
 
   it('hydrates a successful empty pricing snapshot as loaded', async () => {

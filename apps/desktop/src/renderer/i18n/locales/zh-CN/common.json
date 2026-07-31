@@ -3628,6 +3628,7 @@
     "costBreakdownHeader": "按模型拆分：",
     "modelCostLine": "· {{model}} {{cost}}",
     "suggestionLine": "建议：{{suggestion}}",
+    "priceUnavailable": "本轮取不到模型报价，只显示用量",
     "suggestion": {
       "lowCache": "缓存命中率偏低，本轮较多上下文重新计费"
     }
@@ -4947,6 +4948,7 @@
       "turnCost": "本轮消耗",
       "turnCostEstimated": "本轮 token 价值(按 API 单价折算)",
       "turnCostEstimatedValue": "价值 {{cost}}",
+      "turnTokens": "{{tokens}} tokens",
       "userTurnCostTotalLine": "本轮累计：{{cost}}",
       "userTurnCostDetailsTitle": "最后一个 SDK 分段"
     },

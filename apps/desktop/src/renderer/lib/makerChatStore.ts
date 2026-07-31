@@ -4145,8 +4145,20 @@ function initGlobalListeners(): void {
       (legacyTurnCostUsd !== undefined
         ? legacyUsdMoney(legacyTurnCostUsd)
         : undefined);
-    if (!turnMoney || !(turnMoney.amount > 0)) return;
     const { sessionId, clientId } = p;
+    // 无金额但有 token 明细 = main 的 recordTurnUsageOnMessage(算不出报价的轮次):
+    // 只更新明细,让 action bar 退回显示本轮 token。两者都没有才是真的无事可做。
+    if (!turnMoney || !(turnMoney.amount > 0)) {
+      if (!turnUsageDetails) return;
+      setState(sessionId, (s) => {
+        const idx = s.messages.findIndex((m) => m.clientId === clientId);
+        if (idx < 0) return s;
+        const msgs = s.messages.slice();
+        msgs[idx] = { ...msgs[idx], turnUsageDetails };
+        return { ...s, messages: msgs };
+      });
+      return;
+    }
     const userTurnMoney =
       normalizeRegionalMoney(p.userTurnMoney) ??
       (typeof p.userTurnCostUsd === 'number' && p.userTurnCostUsd > 0
@@ -9971,12 +9983,17 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         : {}),
       // SDK done turn seal:新数据用 turnCompleted；存量会话已有 turnCostUsd 的收尾
       // assistant 等价可推导，直接补投影让本修复对历史复现会话立即生效。
+      // turnUsageDetails 同样是 turn 结束才 patch 的字段(无报价轮只落它),因此
+      // 也是等价的收尾信号 —— 少了它,无金额轮重开会话就挂不出 action bar。
       ...(m.role === 'assistant' && (
         agentMeta?.turnCompleted === true ||
-        (persistedTurnMoney?.amount ?? 0) > 0
+        (persistedTurnMoney?.amount ?? 0) > 0 ||
+        turnUsageDetails !== undefined
       )
         ? { turnCompleted: true }
         : {}),
+      // 本轮 token 明细独立于金额挂载:算不出报价的轮次只有它,UI 据此退回显示 token。
+      ...(m.role === 'assistant' && turnUsageDetails ? { turnUsageDetails } : {}),
       // assistant 上挂的 per-turn 费用(main turn 结束时 patch 进 agent_meta)
       ...(m.role === 'assistant' &&
       agentMeta &&
@@ -10007,7 +10024,6 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
                     userTurnCostIsEstimate: agentMeta.userTurnCostIsEstimate === true,
                   }
                 : {}),
-              ...(turnUsageDetails ? { turnUsageDetails } : {}),
             };
           })()
         : {}),

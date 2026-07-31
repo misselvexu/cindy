@@ -94,6 +94,61 @@ describe('normalizeRemoteMessages', () => {
     expect(items[3].turnCostUsd).toBeUndefined();
   });
 
+  // 桌面算不出模型报价的轮次只落 turnUsageDetails:操作行据此退回显示本轮 token,
+  // 且它同样是 turn 收尾信号(否则那条消息挂不出操作行)。
+  it('extracts assistant turn tokens when desktop could not price the turn', () => {
+    const items = normalizeRemoteMessages([
+      message({
+        id: 'usage-only',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: {
+          turnUsageDetails: {
+            inputTokens: 12_400,
+            outputTokens: 8_900,
+            cacheReadTokens: 2_000_000,
+            cacheCreateTokens: 86_400,
+            totalTokens: 2_107_700,
+            cacheHitRate: 0.95,
+          },
+        },
+      }),
+      message({
+        id: 'usage-and-cost',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: {
+          turnCostUsd: 0.42,
+          turnUsageDetails: { totalTokens: 1_000 },
+        },
+      }),
+      message({
+        id: 'zero-tokens',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: { turnUsageDetails: { totalTokens: 0 } },
+      }),
+      message({
+        id: 'malformed-usage',
+        role: 'assistant',
+        content: 'answer',
+        agentMeta: { turnUsageDetails: 'not-an-object' },
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      kind: 'assistant',
+      turnTotalTokens: 2_107_700,
+      // 无报价轮也必须被认成收尾,否则操作行整条不出现。
+      turnCompleted: true,
+    });
+    expect(items[0].turnMoney).toBeUndefined();
+    // 有钱的轮次两者并存:金额优先展示,token 明细留给 tooltip / 回退判定。
+    expect(items[1]).toMatchObject({ turnCostUsd: 0.42, turnTotalTokens: 1_000 });
+    expect(items[2].turnTotalTokens).toBeUndefined();
+    expect(items[3].turnTotalTokens).toBeUndefined();
+  });
+
   it('preserves assistant streaming state from desktop message metadata and content', () => {
     const items = normalizeRemoteMessages([
       message({

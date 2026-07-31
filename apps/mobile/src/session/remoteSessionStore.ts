@@ -1714,17 +1714,27 @@ export const remoteSessionStore = {
       const clientId = readString(payload, 'clientId');
       const turnMoney = normalizeRemoteMoney(payload.turnMoney);
       const turnCostUsd = readNumber(payload, 'turnCostUsd');
+      // 用量明细与金额各自独立:桌面算不出报价时只推 turnUsageDetails,操作行据此
+      // 退回显示本轮 token(与 messageNormalize.readTurnCost 同口径)。
+      const turnUsageDetails = isRecord(payload.turnUsageDetails)
+        ? payload.turnUsageDetails
+        : undefined;
+      const usagePatch = turnUsageDetails ? { turnUsageDetails } : {};
       if (sessionId && clientId && turnMoney && turnMoney.amount > 0) {
         this.patchMessageAgentMeta(sessionId, clientId, {
+          ...usagePatch,
           turnCost: turnMoney,
           ...(turnMoney.currency === 'USD' ? { turnCostUsd: turnMoney.amount } : {}),
           turnCostIsEstimate: turnMoney.kind === 'value-estimate',
         });
       } else if (sessionId && clientId && turnCostUsd !== null && turnCostUsd > 0) {
         this.patchMessageAgentMeta(sessionId, clientId, {
+          ...usagePatch,
           turnCostUsd,
           turnCostIsEstimate: payload.turnCostIsEstimate === true,
         });
+      } else if (sessionId && clientId && turnUsageDetails) {
+        this.patchMessageAgentMeta(sessionId, clientId, usagePatch);
       }
       return;
     }
