@@ -30,8 +30,8 @@ import type { ImOrchestratorConfig } from '../shared/types';
 import type { ImFinalOutput } from '@cindy/im';
 import type { ImTurnRunner } from '../shared/turnRunner';
 import {
-  createWechatTurnPermissionPolicy,
-  supportsWechatTurnPermissionMode,
+  createWechatTurnPermissionPolicyForMode,
+  WECHAT_TURN_PERMISSION_POLICY_UNSUPPORTED,
 } from './permissionPolicy';
 import {
   permissionModeCommandContext,
@@ -1039,20 +1039,26 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           }
         },
         turnPermissionPolicyForRoute: (row, capabilities) =>
-          supportsWechatTurnPermissionMode(capabilities, row.permissionMode)
-            ? createWechatTurnPermissionPolicy(task.id, {
-                onInteractionStateChange: (state) => {
-                  void this.#requireStore().setWaitingDesktop(
-                    task.bindingEpoch,
-                    task.id,
-                    state === 'waiting',
-                  );
-                },
-              })
-            : undefined,
+          createWechatTurnPermissionPolicyForMode(task.id, capabilities, row.permissionMode, {
+            onInteractionStateChange: (state) => {
+              void this.#requireStore().setWaitingDesktop(
+                task.bindingEpoch,
+                task.id,
+                state === 'waiting',
+              );
+            },
+          }),
       });
     } catch (error) {
       await stopTyping();
+      if (
+        error instanceof Error &&
+        error.message.startsWith(WECHAT_TURN_PERMISSION_POLICY_UNSUPPORTED)
+      ) {
+        this.#activeTasks.delete(task.peerId);
+        await this.#commitPreDispatchFailure(task, error.message);
+        return;
+      }
       throw error;
     }
 
@@ -1347,9 +1353,9 @@ export class WechatIM extends BaseIM implements RichChannelIM {
 
   async #commitPreDispatchFailure(task: WechatTask, reason: string): Promise<void> {
     const text =
-      reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED') ||
+      reason.includes(WECHAT_TURN_PERMISSION_POLICY_UNSUPPORTED) ||
       reason.includes('unsupported_turn_permission')
-        ? '当前会话使用“完全访问”权限，个人微信暂不支持该模式。请在 Cindy 中改为“自动”或“每次询问”。'
+        ? '当前 Agent 无法在个人微信中安全使用此权限模式。请在 Cindy 中切换权限模式；若仍失败，请改用支持个人微信权限确认的 Agent。'
         : reason === 'missing_auth'
           ? '当前 Agent 尚未完成授权，请先在 Cindy 中连接模型服务。'
           : '这条消息暂时无法启动，请稍后重试。';
