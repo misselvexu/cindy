@@ -534,6 +534,68 @@ describe("WecomIM routing and ownership", () => {
     expect(cacheImage).not.toHaveBeenCalled();
   });
 
+  it("does not pin or download a cached image after the owning account boundary closes", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const accountToken = { id: 1 };
+    let accountActive = true;
+    host.accountScope = {
+      capture: () => (accountActive ? accountToken : null),
+      isCurrent: (token) => accountActive && token === accountToken,
+      run: async (_token, operation) => operation(),
+    };
+    const client = new FakeClient();
+    const lookup = deferred<{
+      absPath: string;
+      url: string;
+      mimeType: string;
+    }>();
+    const pinCachedImage = vi.fn();
+    const getCachedImage = vi.fn(
+      async (
+        _integration: "wecom",
+        _token: string,
+        options?: { shouldReuse?: () => boolean },
+      ) => {
+        const cached = await lookup.promise;
+        if (options?.shouldReuse?.() === false) return null;
+        pinCachedImage();
+        return cached;
+      },
+    );
+    host.media = {
+      getCachedImage,
+      cacheImage: vi.fn(),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit("message.image", {
+      body: {
+        msgid: "closed-account-cached-image",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "image",
+        image: { url: "https://example.invalid/image" },
+      },
+    });
+    await vi.waitFor(() => expect(getCachedImage).toHaveBeenCalledOnce());
+
+    accountActive = false;
+    lookup.resolve({
+      absPath: "C:\\managed\\photo.jpg",
+      url: "cindy-media://image",
+      mimeType: "image/jpeg",
+    });
+    await flush();
+    await flush();
+
+    expect(pinCachedImage).not.toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
+  });
+
   it("does not persist an inbound file after the transport generation changes", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");

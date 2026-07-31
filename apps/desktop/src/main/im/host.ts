@@ -102,9 +102,13 @@ const host: IMHost = {
         mimeType: hit.mimeType,
       };
     },
-    getCachedImage: async (integration, token) => {
+    getCachedImage: async (integration, token, options) => {
       const hit = await integrationCacheGet(integrationCacheKey(integration, token));
       if (!hit) return null;
+      // Cache lookup can outlive logout/account replacement. Re-check the
+      // transport-owned boundary immediately before pinning so stale media is
+      // not promoted without a message/session owner.
+      if (options?.shouldReuse?.() === false) return null;
       // 命中路径不走 cacheImage,但 IM 复用的可能是 MCP 侧 isCache=true 的缓存
       // blob(feishu 两边有意共用 `feishu:<token>` 命名空间)——IM 语义是用户
       // 附件,同 cacheImage 口径降级为非 cache(review P1);降级失败只警告,

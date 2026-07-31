@@ -105,6 +105,10 @@ export interface IMHostMediaCache {
   getCachedImage(
     integration: 'feishu' | 'discord' | 'telegram' | 'wecom',
     token: string,
+    options?: {
+      /** Re-check transport/account ownership after the async lookup, before host-side pinning. */
+      shouldReuse?: () => boolean;
+    },
   ): Promise<{ absPath: string; url: string; mimeType: string } | null>;
   /** host 托管媒体 URL(cindy-media://)→ 绝对路径;认不出返回 null(出站上传用)。 */
   resolveMediaUrl(url: string): string | null;

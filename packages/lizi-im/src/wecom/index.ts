@@ -742,7 +742,10 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     image: { url: string; aeskey?: string },
   ): Promise<IMAttachment | null> {
     const token = `${messageId}:${index}`;
-    const cached = await this.host.media?.getCachedImage("wecom", token);
+    const cached = await this.host.media?.getCachedImage("wecom", token, {
+      shouldReuse: () => this.isCurrent(client, generation),
+    });
+    if (!this.isCurrent(client, generation)) return null;
     if (cached) {
       return {
         kind: "image",
