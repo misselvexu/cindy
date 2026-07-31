@@ -90,6 +90,26 @@ const RETAINED_PRICING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let unpricedFailureScope: string | null = null;
 
 /**
+ * 本次目录是否构成「可以沿用最后已知报价」的无价故障态 —— 只看目录本身。
+ *
+ * 两条沿用路径共用同一准入(内存 retained、冷启动 hydrate 的故障态投影):少了任何一条,
+ * 另一条立刻变成绕过它的后门。混币目录就这样绕过去一次 —— 内存路径明确拒绝混币,但
+ * 故障态标记当时只看「有没有下发价格字段」,于是冷启动 hydrate 仍会投影旧报价继续记账。
+ *
+ * 两条排除项各有理由:
+ * - 混币(两种以上币种声明):目录本身不可信,不能借「没下发价格」之名沿用旧价;
+ * - 下发了价格字段(含显式全 0 的免费声明):那是有效价格,必须立刻生效。
+ */
+function isRetainableUnpricedCatalog(
+  models: readonly ModelAccessGatewayModel[],
+): boolean {
+  if (models.length === 0) return false;
+  if (hasMixedGatewayCurrencies(models)) return false;
+  if (models.some(declaresGatewayTokenPrice)) return false;
+  return true;
+}
+
+/**
  * 「最后已知报价」是否还能当降级计费基准 —— 年龄闸(不变量 b)的唯一实现。
  *
  * 与 asApproximateQuotes 一样,两条沿用路径(内存 retained、磁盘 hydrate 的故障态
@@ -457,11 +477,9 @@ function retainKnownGatewayQuotes(
 ): ModelPricingCatalog | null {
   if (models.length === 0) return null;
   if (cacheScope !== scope) return null;
-  // (a-1) 目录不可信(混币)→ 维持 gatewayPricingCatalog 的整份拒绝,不启用兜底。
-  if (hasMixedGatewayCurrencies(models)) return null;
-  // (a-2) 目录下发了价格字段(含显式全 0 的免费声明)→ 这是有效价格,必须立刻生效。
-  // 只有字段整体缺失才是「服务端没下发价格」那个故障态。
-  if (models.some(declaresGatewayTokenPrice)) return null;
+  // (a-1)(a-2) 目录准入(混币不可信 / 下发了价格字段就必须立刻生效)—— 与故障态标记
+  // 共用同一函数,避免其中一条路径成为绕过另一条的后门。
+  if (!isRetainableUnpricedCatalog(models)) return null;
   // (a-3) 新目录显式声明的币种与旧报价不一致 → 账号换了结算币种,旧报价不可信。
   // 沿用会让 retained 金额与账本币种分叉,被守卫按异币种整批丢弃(等于兜底白做),
   // 更糟的是按错币种记账。宁可回落无价。
@@ -542,8 +560,18 @@ export function replaceGatewayModelPricing(
   // retainKnownGatewayQuotes (a-2) 同源:显式全 0 的免费目录**下发了**价格,它是有效
   // 快照(重启后就该 hydrate 成"没有报价"),不能混进故障态;models 为空(登出 / clear)
   // 同理照常落盘。
-  const isUnpricedFailure =
+  // 两个相关但**不同**的概念,排除项不一样:
+  //
+  // carriesNoPriceFields —— 本次没下发任何价格字段。它只决定「磁盘上那份还是不是当前
+  //   最可信的事实」:是,就不许覆盖、也不标 hydrated(留给迟到的 prewarm 读回来)。
+  //   混币且无价同样算 —— 目录不可信不代表磁盘那份不可信。
+  // isUnpricedFailure —— 可以**沿用**最后已知报价的故障态,额外排除混币:目录不可信时
+  //   不能借「没下发价格」之名沿用旧价,否则 hydrate 的投影会成为绕过
+  //   retainKnownGatewayQuotes 混币拒绝的后门。混币无价时退回既有的磁盘缓存语义
+  //   (hydrate 恢复精确快照、不投影),那条路径本 PR 不改口径。
+  const carriesNoPriceFields =
     models.length > 0 && !fetched.xd && !models.some(declaresGatewayTokenPrice);
+  const isUnpricedFailure = carriesNoPriceFields && isRetainableUnpricedCatalog(models);
   // 故障态是个显式状态:hydrateFromDisk 也要据它决定「磁盘快照当工作副本时是否标近似」。
   // 目录恢复正常(或换 scope / 登出)时立刻清掉,否则会一直把精确报价说成近似。
   if (isUnpricedFailure) {
@@ -555,7 +583,7 @@ export function replaceGatewayModelPricing(
   // 还没指向本账号 → retained 必然拿不到旧报价。若在这里标成已 hydrate,迟到的 prewarm
   // 会被 getModelPricing / hydrateFromDisk 的短路挡住,永远读不回磁盘上那份精确快照
   // —— 恰好在本次线上无价故障场景下,重启反而彻底失去最后已知报价。
-  if (!isUnpricedFailure) hydratedScopes.add(scope);
+  if (!carriesNoPriceFields) hydratedScopes.add(scope);
   // 写盘照常发生(accountCurrency 要能随快照恢复,与有没有报价无关),但故障轮与
   // retained 轮不得用自己的报价取代磁盘上那份 —— 由 preserveDiskQuotes 兜住。
   enqueueDiskWrite(() =>
@@ -564,7 +592,7 @@ export function replaceGatewayModelPricing(
       pricing,
       gatewayAccountCurrency,
       cacheAt,
-      isUnpricedFailure || retainedFromLastSnapshot,
+      carriesNoPriceFields || retainedFromLastSnapshot,
     ),
   );
   broadcastPricing(pricing);
