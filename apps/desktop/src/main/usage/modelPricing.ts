@@ -119,7 +119,10 @@ function isRetainableUnpricedCatalog(
  * sync 来重新评估,超龄价就长期充当计费基准。判据必须与「标近似」同处收敛。
  */
 function isRetainablePricingAge(pricedAt: number): boolean {
-  return pricedAt > 0 && Date.now() - pricedAt <= RETAINED_PRICING_MAX_AGE_MS;
+  const age = Date.now() - pricedAt;
+  // age >= 0 不是多余的:系统时钟回拨(或快照带了未来时间戳)会让 age 变成负数,从而
+  // 「小于上限」恒成立 —— 本该停用的陈旧价会继续通过三条判断进入账本。
+  return pricedAt > 0 && age >= 0 && age <= RETAINED_PRICING_MAX_AGE_MS;
 }
 
 /**

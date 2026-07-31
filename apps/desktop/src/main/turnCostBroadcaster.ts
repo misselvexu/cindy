@@ -198,16 +198,27 @@ export async function recordTurnCostOnMessage(
   }
 }
 
-/** 无金额路径只需要落库 + 广播两件事,不读往轮累计、不动 scheduler 账本。 */
-export type TurnUsageDeps = Pick<TurnCostDeps, 'patchAgentMeta' | 'enqueue' | 'broadcast'>;
+/**
+ * 无金额路径:落库 + 广播,外加读一次本用户轮的既有累计(见
+ * recordTurnUsageOnMessage 对 userTurnMoney 的处理)。不动 scheduler 账本。
+ */
+export type TurnUsageDeps = Pick<
+  TurnCostDeps,
+  'patchAgentMeta' | 'enqueue' | 'broadcast' | 'readPriorUserRoundCost'
+>;
 
 /**
- * 算不出金额时,只把本轮 token 明细挂到该轮最后一条 assistant 上。
+ * 算不出金额时,把本轮 token 明细挂到该轮最后一条 assistant 上。
  *
- * 与 recordTurnCostOnMessage 的区别就是"不碰钱":不写 turnCost / turnCostUsd /
- * userTurnCost,也不调 applyScheduleRunCostChange —— 账本只接受真实计费,这里
- * 提供的是用量事实。已经有金额的消息不会走到这里(register 侧是 if/else),即便
- * 走到也只会 merge 进 turnUsageDetails 一个字段,不覆盖既有金额。
+ * 与 recordTurnCostOnMessage 的区别是**不为当前 segment 记账**:不写 turnCost /
+ * turnCostUsd,也不调 applyScheduleRunCostChange —— 账本只接受真实计费,这里提供的是
+ * 用量事实。
+ *
+ * 但「本用户轮此前已经产生的费用」必须继续显示。一次用户请求可能含多个 SDK segment
+ * (自动续跑):前面的 segment 有真实费用、最后一个 segment 缺报价走本函数时,若只写
+ * turnUsageDetails,收尾那条消息的操作栏会退回显示 token,把这一轮已经花掉的钱藏起来
+ * —— 而 readPriorUserRoundCost 的契约本来就是「让收尾消息承载整轮总额」。所以这里读一次
+ * 往轮累计,有则连同 userTurnCost 一起投影到消息与 payload(仍不含当前无价 segment)。
  *
  * turnUsageDetails 为空(整轮 0 token)时直接跳过:没有可展示的事实,不写空对象。
  */
@@ -222,12 +233,41 @@ export async function recordTurnUsageOnMessage(
   const { sessionId, clientId, turnUsageDetails } = args;
   if (!sessionId || !clientId || !turnUsageDetails) return false;
   try {
-    const patched = await deps.enqueue(`turn-usage:${sessionId}:${clientId}`, () =>
-      deps.patchAgentMeta(sessionId, clientId, { turnUsageDetails }),
-    );
-    if (!patched) return false;
+    const outcome = await deps.enqueue(`turn-usage:${sessionId}:${clientId}`, async () => {
+      // 与 recordTurnCostOnMessage 同一条 durable FIFO,所以这里看得到本用户轮此前
+      // 每个 segment 已落库的费用。
+      const prior = await deps.readPriorUserRoundCost(sessionId, clientId);
+      const userTurnMoney =
+        prior.money && prior.money.amount > 0 ? prior.money : null;
+      const patch: Record<string, unknown> = { turnUsageDetails };
+      if (userTurnMoney) {
+        patch.userTurnCost = userTurnMoney;
+        patch.userTurnCostIsEstimate = prior.hasEstimatedValue;
+        if (userTurnMoney.currency === 'USD') {
+          patch.userTurnCostUsd = userTurnMoney.amount;
+        }
+      }
+      const patched = await deps.patchAgentMeta(sessionId, clientId, patch);
+      if (!patched) return null;
+      return { userTurnMoney, userTurnCostIsEstimate: prior.hasEstimatedValue };
+    });
+    if (!outcome) return false;
     try {
-      deps.broadcast({ sessionId, clientId, turnUsageDetails });
+      const { userTurnMoney, userTurnCostIsEstimate } = outcome;
+      deps.broadcast({
+        sessionId,
+        clientId,
+        turnUsageDetails,
+        ...(userTurnMoney
+          ? {
+              userTurnMoney,
+              ...(userTurnMoney.currency === 'USD'
+                ? { userTurnCostUsd: userTurnMoney.amount }
+                : {}),
+              userTurnCostIsEstimate,
+            }
+          : {}),
+      });
     } catch (err) {
       // 明细已落库,后开窗口走历史加载仍能读到;广播失败不影响持久事实。
       log.warn(

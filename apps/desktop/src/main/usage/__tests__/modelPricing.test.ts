@@ -582,6 +582,20 @@ describe('gateway model pricing projection', () => {
     await expect(getModelPricingForModel('xd', 'ages-out')).resolves.toEqual({});
   });
 
+  it('treats a future-dated snapshot as unusable instead of permanently fresh', async () => {
+    const realAt = Date.parse('2026-07-20T10:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(realAt);
+    replaceGatewayModelPricing([
+      { id: 'clock-skew', inputCostPerToken: 0.000003, outputCostPerToken: 0.000015 },
+    ]);
+
+    // 时钟回拨(或快照带了未来时间戳):Date.now() - pricedAt 变成负数,
+    // 「小于上限」恒成立 —— 若不显式要求 age >= 0,本该停用的陈旧价会一直可用。
+    vi.spyOn(Date, 'now').mockReturnValue(realAt - 48 * 3_600_000);
+    expect(replaceGatewayModelPricing([{ id: 'clock-skew' }])).toEqual({});
+    await expect(getModelPricing()).resolves.toEqual({});
+  });
+
   it('refuses to bill from a disk snapshot that is already too old', async () => {
     const realAt = Date.parse('2026-07-20T10:00:00.000Z');
     vi.spyOn(Date, 'now').mockReturnValue(realAt);
