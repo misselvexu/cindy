@@ -64,7 +64,8 @@ export function createSlashHandlers(
   cards: ImCardBuilders,
   turnRunner: ImTurnRunner,
 ): ImSlashHandlers {
-  const { im, ui, channel, threadScoped } = adapter;
+  const { im, output, ui, channel, threadScoped } = adapter;
+  const richIm = output.kind === 'rich-card' ? output.im : null;
   const log = createLogger(`im:${channel}:slash`);
   // threadScoped 渠道的 thread 文案组 — orchestrator 接线期已断言存在
   const threadUi = ui.thread;
@@ -156,6 +157,10 @@ export function createSlashHandlers(
       }
 
       case '/model': {
+        if (!richIm) {
+          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+          return true;
+        }
         // thread 模型: slash 命令不携带 thread 上下文(Slack 平台限制), 无法定位
         // 目标 thread/session;不拦的话 resolveRouteTarget 会误建空 scope session。
         if (threadScoped && threadUi) {
@@ -204,7 +209,7 @@ export function createSlashHandlers(
             : undefined,
         });
         try {
-          await im.sendInteractiveCard(ctx.userId, spec);
+          await richIm.sendInteractiveCard(ctx.userId, spec);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(`/model card send failed: ${msg}`);
@@ -259,12 +264,16 @@ export function createSlashHandlers(
       }
 
       case '/ctr': {
+        if (!richIm) {
+          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+          return true;
+        }
         // ── thread 模型: 整个选择流程在"接管锚点卡"的 thread 里进行 ────────
         // 顶层只发一张锚点卡(未来的接管 thread root), 工作区/会话选择卡发进
         // 它的 thread — 用户从选择那一刻就在 thread 里操作, 接管完成后锚点卡
         // 原地变身"已接管"(带 🚪), 同一 thread 直接续聊。
-        if (threadScoped && threadUi && im.threadKeyForMessage) {
-          await startThreadControlFlow(im, adapter, cards, {
+        if (threadScoped && threadUi && richIm.threadKeyForMessage) {
+          await startThreadControlFlow(richIm, adapter, cards, {
             botContextId: ctx.botContextId,
             userId: ctx.userId,
           });
@@ -298,7 +307,7 @@ export function createSlashHandlers(
           currentAttachedTitle,
         });
         try {
-          await im.sendInteractiveCard(ctx.userId, spec);
+          await richIm.sendInteractiveCard(ctx.userId, spec);
           enterControl(ctx.botContextId, ctx.userId);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -311,7 +320,7 @@ export function createSlashHandlers(
         // 跨工作区最近会话直达(官方 bot /session 习惯) — 提供文案组的渠道
         // 才放行; 选中走 control:session-pick 接管路径。
         const recentUi = ui.cards.control.recentSessions;
-        if (!recentUi) {
+        if (!richIm || !recentUi) {
           await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
           return true;
         }
@@ -321,7 +330,7 @@ export function createSlashHandlers(
           sessions: recent,
         });
         try {
-          await im.sendInteractiveCard(ctx.userId, spec);
+          await richIm.sendInteractiveCard(ctx.userId, spec);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(`/session card send failed: ${msg}`);
@@ -333,7 +342,7 @@ export function createSlashHandlers(
         // 项目切换 — projectSwitching 渠道专属(个人 Telegram);其它渠道当
         // 未知命令处理, 不暴露半成品入口。
         const projectUi = ui.cards.project;
-        if (!adapter.projectSwitching || !projectUi) {
+        if (!richIm || !adapter.projectSwitching || !projectUi) {
           await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
           return true;
         }
@@ -362,7 +371,7 @@ export function createSlashHandlers(
           currentName,
         });
         try {
-          await im.sendInteractiveCard(ctx.userId, spec);
+          await richIm.sendInteractiveCard(ctx.userId, spec);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(`/project card send failed: ${msg}`);
@@ -371,6 +380,10 @@ export function createSlashHandlers(
       }
 
       case '/permission': {
+        if (!richIm) {
+          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+          return true;
+        }
         if (threadScoped && threadUi) {
           await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported);
           return true;
@@ -390,7 +403,7 @@ export function createSlashHandlers(
           currentMode: row.permissionMode,
         });
         try {
-          await im.sendInteractiveCard(ctx.userId, spec);
+          await richIm.sendInteractiveCard(ctx.userId, spec);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(`/permission card send failed: ${msg}`);

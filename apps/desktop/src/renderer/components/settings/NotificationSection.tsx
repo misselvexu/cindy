@@ -1,9 +1,10 @@
 /**
  * NotificationSection — Settings 页"系统通知"区块。
  *
- * 两个独立开关:
+ * 两个个人通知开关:
  *   1. 桌面通知 — CC Agent session 完成 / 待回复时弹系统 toast(默认开)。
  *   2. 飞书通知 — 同源触发,失焦时给 bot owner 私聊一条文本(默认关)。
+ * 企业微信群是共享通道,总开关控制通道可用性;每个自动操作仍需显式选择。
  *
  * 飞书开关的可用前提是 bot 已绑定 ownerOpenId(用户至少私聊过 bot 一次);
  * 未绑定时开关禁用,并在 hint 里提示去"飞书机器人" tab 完成配置/绑定。
@@ -132,8 +133,12 @@ export function NotificationSection() {
           </div>
           <Switch
             checked={wecomGroup.enabled && wecomGroup.configured}
-            onCheckedChange={wecomGroup.setEnabled}
-            disabled={!wecomGroup.configured || wecomGroup.loading}
+            onCheckedChange={(next) => {
+              void wecomGroup
+                .setEnabled(next)
+                .catch(() => toast.error(t('settings.notifications.wecomGroupToggleFailed')));
+            }}
+            disabled={!wecomGroup.configured || wecomGroup.busy}
             aria-label={t('settings.notifications.wecomGroupAria')}
           />
         </div>
@@ -145,7 +150,7 @@ export function NotificationSection() {
               disabled={wecomGroup.busy}
               onClick={() => {
                 void wecomGroup
-                  .test()
+                  .test(t('settings.notifications.wecomGroupTestMessage'))
                   .then(() => toast.success(t('settings.notifications.wecomGroupTestSuccess')))
                   .catch(() => toast.error(t('settings.notifications.wecomGroupTestFailed')));
               }}
@@ -203,7 +208,10 @@ export function NotificationSection() {
               disabled={wecomGroup.busy || !webhookUrl.trim()}
               onClick={() => {
                 void wecomGroup
-                  .saveAndTest(webhookUrl)
+                  .saveAndTest(
+                    webhookUrl,
+                    t('settings.notifications.wecomGroupTestMessage'),
+                  )
                   .then(() => {
                     setWebhookUrl('');
                     toast.success(t('settings.notifications.wecomGroupSaveSuccess'));

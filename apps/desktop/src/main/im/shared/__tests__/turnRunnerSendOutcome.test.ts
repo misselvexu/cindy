@@ -1242,10 +1242,12 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
 
   it('commits one terminal payload for a chunked-text output driver', async () => {
     const previousOutput = fakeAdapter.output;
+    const beginReply = vi.fn(async () => undefined);
     const commitFinal = vi.fn(async () => undefined);
     fakeAdapter.output = {
       kind: 'chunked-text',
       im: mocks.feishuIm as unknown as ChannelIM,
+      beginReply,
       commitFinal,
     };
     try {
@@ -1258,6 +1260,8 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       await flushMicrotasks();
 
       expect(mocks.feishuIm.startStreamingText).not.toHaveBeenCalled();
+      expect(beginReply).toHaveBeenCalledOnce();
+      expect(beginReply).toHaveBeenCalledWith('ou_user');
       expect(commitFinal).toHaveBeenCalledTimes(1);
       expect(commitFinal).toHaveBeenCalledWith({
         userId: 'ou_user',

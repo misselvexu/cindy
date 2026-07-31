@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-import type { RichChannelIM, WecomIM } from '@cindy/im';
+import type { WecomIM } from '@cindy/im';
 
 import type { ImChannelAdapter, ImOrchestratorConfig } from '../shared/types';
 import { ownerScopedImUserDataPath } from '../ownerScopedStorage';
@@ -25,10 +25,11 @@ export function buildWecomAdapter(
 ): ImChannelAdapter {
   return {
     channel: 'wecom',
-    im: wecomIm as unknown as RichChannelIM,
+    im: wecomIm,
     output: {
       kind: 'chunked-text',
       im: wecomIm,
+      beginReply: (userId) => wecomIm.beginReply(userId),
       commitFinal: (output) => wecomIm.commitFinal(output),
     },
     config,

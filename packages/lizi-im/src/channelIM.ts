@@ -134,5 +134,10 @@ export type ImOutputDriver =
   | {
       kind: 'chunked-text';
       im: TextChannelIM;
+      /**
+       * Reserve an inbound reply context before a potentially long turn.
+       * Transports with callback deadlines may emit a non-terminal placeholder.
+       */
+      beginReply?(userId: string): Promise<void>;
       commitFinal(output: ImFinalOutput): Promise<void>;
     };

@@ -2110,15 +2110,21 @@ interface ElectronAPI {
      * mobile = 手机推送:桌面侧无独立开关(手机端注册/注销 token 决定接收),
      * 发送侧防打扰在 main 的 device-link 模块收口,renderer 恒传 true。
      */
-    channels?: { desktop?: boolean; feishu?: boolean; wecomGroup?: boolean; mobile?: boolean };
+    channels?: { desktop?: boolean; feishu?: boolean; mobile?: boolean };
   }) => Promise<void>;
   /** Sync the renderer-owned global desktop-notification preference to main. */
   notificationSetDesktopEnabled?: (enabled: boolean) => Promise<{ ok: true }>;
   wecomGroupNotification: {
-    getState: () => Promise<{ configured: boolean; maskedKey?: string }>;
-    saveAndTest: (webhookUrl: string) => Promise<{ configured: boolean; maskedKey?: string }>;
-    test: () => Promise<{ ok: true }>;
-    clear: () => Promise<{ configured: boolean }>;
+    getState: () => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    saveAndTest: (
+      webhookUrl: string,
+      testMessage: string,
+    ) => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    test: (testMessage: string) => Promise<{ ok: true }>;
+    setEnabled: (
+      enabled: boolean,
+    ) => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    clear: () => Promise<{ configured: boolean; enabled: boolean }>;
   };
   /** 将对应 session 标记为需要关注，显示 Dock/taskbar app badge。 */
   notificationMarkSessionAttention: (sessionId: string) => Promise<void>;

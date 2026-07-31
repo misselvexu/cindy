@@ -221,8 +221,10 @@ export function WecomBotSection({
                   !canReconnect && 'cursor-not-allowed opacity-40',
                 )}
               >
-                {isSaving ? <Loader2 size={14} className="animate-spin" /> : null}
-                {isSaving
+                {isSaving || status.kind === 'connecting' ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : null}
+                {isSaving || status.kind === 'connecting'
                   ? t('settings.wecomBot.connectingAction')
                   : t('settings.wecomBot.reconnect')}
               </button>
@@ -239,8 +241,10 @@ export function WecomBotSection({
                   !canConnect && 'cursor-not-allowed opacity-40',
                 )}
               >
-                {isSaving ? <Loader2 size={14} className="animate-spin" /> : null}
-                {isSaving
+                {isSaving || status.kind === 'connecting' ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : null}
+                {isSaving || status.kind === 'connecting'
                   ? t('settings.wecomBot.connectingAction')
                   : t('settings.wecomBot.connect')}
               </button>

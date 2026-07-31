@@ -12,14 +12,17 @@ import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer';
 
 const log = createLogger('wecom-group-notification');
 const WEBHOOK_SECRET_NAME = 'wecom-group-webhook-url';
+const ENABLED_SETTING_NAME = 'wecom-group-notification-enabled';
 const WEBHOOK_HOST = 'qyapi.weixin.qq.com';
 const WEBHOOK_PATH = '/cgi-bin/webhook/send';
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const MAX_MARKDOWN_BYTES = 4_000;
+const TEST_MESSAGE_INVALID = 'WECOM_GROUP_TEST_MESSAGE_INVALID';
 
 export interface WecomGroupNotificationState {
   configured: boolean;
+  enabled: boolean;
   maskedKey?: string;
 }
 
@@ -87,6 +90,15 @@ function splitUtf8(text: string, maxBytes = MAX_MARKDOWN_BYTES): string[] {
   return chunks;
 }
 
+function parseTestMessage(raw: unknown): string {
+  if (typeof raw !== 'string') throw new TypeError('testMessage must be a string');
+  const message = raw.trim();
+  if (!message || Buffer.byteLength(message, 'utf8') > MAX_MARKDOWN_BYTES) {
+    throw new Error(TEST_MESSAGE_INVALID);
+  }
+  return message;
+}
+
 async function readResponseText(response: Response): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return '';
@@ -120,44 +132,73 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
 
   getState(): WecomGroupNotificationState {
     const stored = this.secrets.read(WEBHOOK_SECRET_NAME);
-    if (!stored) return { configured: false };
+    if (!stored) return { configured: false, enabled: false };
     try {
-      return { configured: true, maskedKey: maskWebhookKey(parseWebhookUrl(stored)) };
+      return {
+        configured: true,
+        // Existing configurations predate the persisted master switch and
+        // remain enabled until the user explicitly turns them off.
+        enabled: this.secrets.read(ENABLED_SETTING_NAME) !== 'false',
+        maskedKey: maskWebhookKey(parseWebhookUrl(stored)),
+      };
     } catch {
       log.warn('stored webhook URL is invalid; treating it as unconfigured');
-      return { configured: false };
+      return { configured: false, enabled: false };
     }
+  }
+
+  setEnabled(enabled: boolean): WecomGroupNotificationState {
+    const state = this.getState();
+    if (!state.configured) throw new Error('WECOM_GROUP_WEBHOOK_NOT_CONFIGURED');
+    if (!this.secrets.write(ENABLED_SETTING_NAME, String(enabled))) {
+      throw new Error('WECOM_GROUP_ENABLED_SAVE_FAILED');
+    }
+    return { ...state, enabled };
   }
 
   async saveAndTest(
     rawUrl: string,
+    testMessage: string,
     isAccountCurrent: () => boolean = () => true,
   ): Promise<WecomGroupNotificationState> {
     const url = parseWebhookUrl(rawUrl);
+    const message = parseTestMessage(testMessage);
     await this.enqueue(() => {
       if (!isAccountCurrent()) throw new ImAccountScopeClosedError();
-      return this.send(url, 'Cindy 企业微信群通知测试成功');
+      return this.send(url, message);
     });
     if (!isAccountCurrent()) {
       throw new ImAccountScopeClosedError();
     }
-    if (!this.secrets.write(WEBHOOK_SECRET_NAME, url.toString())) {
+    const previousUrl = this.secrets.read(WEBHOOK_SECRET_NAME);
+    const previousEnabled = this.secrets.read(ENABLED_SETTING_NAME);
+    const saved =
+      this.secrets.write(WEBHOOK_SECRET_NAME, url.toString()) &&
+      this.secrets.write(ENABLED_SETTING_NAME, 'true');
+    if (!saved) {
+      this.restoreValue(WEBHOOK_SECRET_NAME, previousUrl);
+      this.restoreValue(ENABLED_SETTING_NAME, previousEnabled);
       throw new Error('WECOM_GROUP_WEBHOOK_SAVE_FAILED');
     }
-    return { configured: true, maskedKey: maskWebhookKey(url) };
+    return { configured: true, enabled: true, maskedKey: maskWebhookKey(url) };
   }
 
-  async test(): Promise<void> {
+  async test(testMessage: string): Promise<void> {
     const url = this.requireStoredUrl();
-    await this.enqueue(() => this.send(url, 'Cindy 企业微信群通知测试成功'));
+    const message = parseTestMessage(testMessage);
+    await this.enqueue(() => this.send(url, message));
   }
 
   clear(): WecomGroupNotificationState {
     this.secrets.remove(WEBHOOK_SECRET_NAME);
-    return { configured: false };
+    this.secrets.remove(ENABLED_SETTING_NAME);
+    return { configured: false, enabled: false };
   }
 
   async publishMarkdown(markdown: string): Promise<void> {
+    if (!this.getState().enabled) {
+      throw new Error('WECOM_GROUP_NOTIFICATIONS_DISABLED');
+    }
     return this.enqueue(async () => {
       const url = this.requireStoredUrl();
       const chunks = splitUtf8(markdown.trim() || 'Cindy 通知');
@@ -181,6 +222,11 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
     const stored = this.secrets.read(WEBHOOK_SECRET_NAME);
     if (!stored) throw new Error('WECOM_GROUP_WEBHOOK_NOT_CONFIGURED');
     return parseWebhookUrl(stored);
+  }
+
+  private restoreValue(name: string, previous: string | null): void {
+    if (previous === null) this.secrets.remove(name);
+    else this.secrets.write(name, previous);
   }
 
   private async send(url: URL, markdown: string): Promise<void> {
@@ -216,21 +262,29 @@ export function initWecomGroupNotificationIpc(): void {
     assertTrustedAppRendererEvent(event);
     return wecomGroupNotificationService.getState();
   });
-  ipcMain.handle('wecomGroupNotification:save-and-test', async (event, webhookUrl: unknown) => {
+  ipcMain.handle(
+    'wecomGroupNotification:save-and-test',
+    async (event, webhookUrl: unknown, testMessage: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof webhookUrl !== 'string') throw new TypeError('webhookUrl must be a string');
+      const accountGeneration = captureImAccountGeneration();
+      if (accountGeneration === null) throw new ImAccountScopeClosedError();
+      return runInImAccountGeneration(accountGeneration, () =>
+        wecomGroupNotificationService.saveAndTest(webhookUrl, parseTestMessage(testMessage), () =>
+          isImAccountGenerationCurrent(accountGeneration),
+        ),
+      );
+    },
+  );
+  ipcMain.handle('wecomGroupNotification:test', async (event, testMessage: unknown) => {
     assertTrustedAppRendererEvent(event);
-    if (typeof webhookUrl !== 'string') throw new TypeError('webhookUrl must be a string');
-    const accountGeneration = captureImAccountGeneration();
-    if (accountGeneration === null) throw new ImAccountScopeClosedError();
-    return runInImAccountGeneration(accountGeneration, () =>
-      wecomGroupNotificationService.saveAndTest(webhookUrl, () =>
-        isImAccountGenerationCurrent(accountGeneration),
-      ),
-    );
-  });
-  ipcMain.handle('wecomGroupNotification:test', async (event) => {
-    assertTrustedAppRendererEvent(event);
-    await wecomGroupNotificationService.test();
+    await wecomGroupNotificationService.test(parseTestMessage(testMessage));
     return { ok: true as const };
+  });
+  ipcMain.handle('wecomGroupNotification:set-enabled', (event, enabled: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+    return wecomGroupNotificationService.setEnabled(enabled);
   });
   ipcMain.handle('wecomGroupNotification:clear', (event) => {
     assertTrustedAppRendererEvent(event);
@@ -240,5 +294,6 @@ export function initWecomGroupNotificationIpc(): void {
 
 export const __testing = {
   parseWebhookUrl,
+  parseTestMessage,
   splitUtf8,
 };

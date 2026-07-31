@@ -42,6 +42,7 @@ const BOT_SECRET_SECRET_KEY = "wecom-bot-secret";
 const OWNER_USER_ID_SECRET_KEY = "wecom-owner-user-id";
 const CALLBACK_TTL_MS = 4 * 60_000;
 const CALLBACK_QUEUE_CAPACITY = 64;
+const STREAM_SAFE_TIMEOUT_MS = 5 * 60_000;
 const DEDUPE_CAPACITY = 2_048;
 const SECRET_WRITE_FAILED_REASON = "无法使用系统安全存储保存企业微信机器人凭证";
 
@@ -55,16 +56,25 @@ interface PendingFrame {
   receivedAt: number;
 }
 
+interface PendingResponse {
+  frame: WecomFrame | null;
+  streamId: string;
+  startedAt: number;
+  passiveStarted: boolean;
+}
+
 export interface WecomIMOptions {
   clientFactory?: (options: WSClientOptions) => WSClient;
   now?: () => number;
 }
 
+/** Enterprise WeChat transport with durable chunked-text output. */
 export class WecomIM extends BaseIM implements TextChannelIM {
   private readonly messageHandlers = new Set<MessageHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
   private readonly textInterceptors = new Set<TextInterceptor>();
   private readonly pendingFrames = new Map<string, PendingFrame[]>();
+  private readonly pendingResponses = new Map<string, PendingResponse[]>();
   private readonly inboundTails = new Map<string, Promise<void>>();
   private readonly seenMessageIds = new Set<string>();
   private readonly mediaDir: string;
@@ -73,6 +83,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   private status: IMStatus = { kind: "idle" };
   private botId = "";
   private ownerUserId = "";
+  private lastAuthFailureReason = "";
   private generation = 0;
 
   constructor(
@@ -104,6 +115,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   async dispose(): Promise<void> {
     this.generation += 1;
     this.pendingFrames.clear();
+    this.pendingResponses.clear();
     this.inboundTails.clear();
     this.seenMessageIds.clear();
     this.client?.disconnect();
@@ -182,6 +194,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       this.client?.disconnect();
       this.client = null;
       this.pendingFrames.clear();
+      this.pendingResponses.clear();
       this.inboundTails.clear();
       this.seenMessageIds.clear();
       this.host.secrets.remove(BOT_ID_SECRET_KEY);
@@ -274,9 +287,35 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     }
   }
 
+  /**
+   * Preserve the callback reply window before the Agent starts. The final
+   * response reuses this stream id; after the safe window it falls back to an
+   * active markdown message.
+   */
+  async beginReply(userId: string): Promise<void> {
+    const client = this.requireConnectedClient();
+    const response: PendingResponse = {
+      frame: this.claimOldestFrame(userId),
+      streamId: randomUUID(),
+      startedAt: this.now(),
+      passiveStarted: false,
+    };
+    this.enqueueResponse(userId, response);
+    if (!response.frame) return;
+    try {
+      await client.replyStream(response.frame, response.streamId, " ", false);
+      response.passiveStarted = true;
+    } catch (error) {
+      this.log.warn(
+        "failed to start passive stream; final reply will use active send",
+        safeError(error),
+      );
+    }
+  }
+
   async commitFinal(output: ImFinalOutput): Promise<void> {
     const chunks = chunkWecomMarkdown(output.text);
-    await this.sendChunks(output.userId, chunks, "oldest");
+    await this.sendFinalChunks(output.userId, chunks);
     for (const absPath of output.mediaAbsPaths?.slice(0, 4) ?? []) {
       const result = await this.sendFile(output.userId, absPath);
       if (!result.ok) {
@@ -291,6 +330,8 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     const generation = (this.generation += 1);
     this.client?.disconnect();
     this.pendingFrames.clear();
+    this.pendingResponses.clear();
+    this.lastAuthFailureReason = "";
     this.setStatus({ kind: "connecting" });
 
     const clientFactory =
@@ -320,7 +361,17 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     client.on("error", (error) => {
       if (!this.isCurrent(client, generation)) return;
       this.log.warn("connection error", safeError(error));
-      this.setStatus({ kind: "error", reason: sanitizeReason(error.message) });
+      const code = errorCode(error);
+      if (/^Authentication failed:/iu.test(error.message)) {
+        this.lastAuthFailureReason = formatAuthFailureReason(error.message);
+      }
+      this.setStatus({
+        kind: "error",
+        reason:
+          code === "WS_AUTH_FAILURE_EXHAUSTED"
+            ? this.lastAuthFailureReason || "企业微信鉴权失败，请检查 Bot ID、Secret 和长连接模式"
+            : this.lastAuthFailureReason || sanitizeReason(error.message),
+      });
     });
     client.on("event.disconnected_event", () => {
       if (!this.isCurrent(client, generation)) return;
@@ -672,6 +723,46 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     return { messageId: firstId };
   }
 
+  private async sendFinalChunks(
+    userId: string,
+    chunks: string[],
+  ): Promise<{ messageId: string }> {
+    const client = this.requireConnectedClient();
+    const lane = decodeWecomLane(userId);
+    const response = this.claimOldestResponse(userId);
+    const messageId = response?.streamId ?? randomUUID();
+    let start = 0;
+
+    if (
+      response?.frame &&
+      response.passiveStarted &&
+      this.now() - response.startedAt < STREAM_SAFE_TIMEOUT_MS
+    ) {
+      try {
+        await client.replyStream(
+          response.frame,
+          response.streamId,
+          chunks[0] ?? " ",
+          true,
+        );
+        start = 1;
+      } catch (error) {
+        this.log.warn(
+          "passive stream finalization failed; using active send",
+          safeError(error),
+        );
+      }
+    }
+
+    for (let index = start; index < chunks.length; index += 1) {
+      await client.sendMessage(lane.targetId, {
+        msgtype: "markdown",
+        markdown: { content: chunks[index]! },
+      });
+    }
+    return { messageId };
+  }
+
   private requireConnectedClient(): WSClient {
     if (!this.client || !this.client.isConnected)
       throw new Error("WECOM_NOT_CONNECTED");
@@ -708,6 +799,21 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     queue.push({ frame, receivedAt: this.now() });
     while (queue.length > CALLBACK_QUEUE_CAPACITY) queue.shift();
     this.pendingFrames.set(lane, queue);
+  }
+
+  private enqueueResponse(lane: string, response: PendingResponse): void {
+    const queue = this.pendingResponses.get(lane) ?? [];
+    queue.push(response);
+    while (queue.length > CALLBACK_QUEUE_CAPACITY) queue.shift();
+    this.pendingResponses.set(lane, queue);
+  }
+
+  private claimOldestResponse(lane: string): PendingResponse | null {
+    const queue = this.pendingResponses.get(lane) ?? [];
+    const found = queue.shift() ?? null;
+    if (queue.length) this.pendingResponses.set(lane, queue);
+    else this.pendingResponses.delete(lane);
+    return found;
   }
 
   private claimNewestFrame(lane: string): WecomFrame | null {
@@ -841,6 +947,16 @@ function sanitizeReason(reason: string): string {
     .replace(/https?:\/\/\S+/giu, "[url]")
     .replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]")
     .slice(0, 240);
+}
+
+function formatAuthFailureReason(message: string): string {
+  const detail = sanitizeReason(message).replace(
+    /^Authentication failed:\s*/iu,
+    "",
+  );
+  return detail
+    ? `企业微信鉴权失败：${detail}`
+    : "企业微信鉴权失败，请检查 Bot ID、Secret 和长连接模式";
 }
 
 function safeError(error: unknown): { code: string; message: string } {

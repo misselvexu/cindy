@@ -4,13 +4,20 @@ import type { IMHost, IMMessageEvent } from "../../types.js";
 import { decodeWecomLane } from "../codec.js";
 import { WecomIM } from "../index.js";
 
-type Handler = (...args: any[]) => void;
+type Handler = (payload?: unknown) => void;
 
 class FakeClient {
   readonly handlers = new Map<string, Handler[]>();
   readonly sendMessage = vi.fn(async () => ({}));
   readonly sendMediaMessage = vi.fn(async () => ({}));
-  readonly replyStream = vi.fn(async () => ({}));
+  readonly replyStream = vi.fn<
+    (
+      frame: unknown,
+      streamId: string,
+      content: string,
+      finish: boolean,
+    ) => Promise<Record<string, never>>
+  >(async () => ({}));
   readonly replyMedia = vi.fn(async () => ({}));
   readonly uploadMedia = vi.fn(async () => ({ media_id: "media-1" }));
   readonly downloadFile = vi.fn(async () => ({
@@ -153,6 +160,78 @@ describe("WecomIM routing and ownership", () => {
     });
   });
 
+  it("starts a passive stream before the turn and finalizes the same stream", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const im = new WecomIM(host, {
+      clientFactory: () => client as never,
+      now: () => 1_000,
+    });
+
+    await im.init();
+    const frame = message({ id: "m-stream", sender: "owner", text: "task" });
+    client.emit("message.text", frame);
+    await flush();
+
+    await im.beginReply("owner");
+    const streamId = client.replyStream.mock.calls[0]?.[1];
+    expect(client.replyStream).toHaveBeenNthCalledWith(
+      1,
+      frame,
+      expect.any(String),
+      " ",
+      false,
+    );
+
+    await im.commitFinal({
+      userId: "owner",
+      text: "final answer",
+      terminal: "done",
+    });
+
+    expect(client.replyStream).toHaveBeenNthCalledWith(
+      2,
+      frame,
+      streamId,
+      "final answer",
+      true,
+    );
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("falls back to active send after the passive stream safety window", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    let now = 1_000;
+    const im = new WecomIM(host, {
+      clientFactory: () => client as never,
+      now: () => now,
+    });
+
+    await im.init();
+    client.emit(
+      "message.text",
+      message({ id: "m-timeout", sender: "owner", text: "long task" }),
+    );
+    await flush();
+    await im.beginReply("owner");
+    now += 5 * 60_000;
+
+    await im.commitFinal({
+      userId: "owner",
+      text: "late answer",
+      terminal: "done",
+    });
+
+    expect(client.replyStream).toHaveBeenCalledTimes(1);
+    expect(client.sendMessage).toHaveBeenCalledWith("owner", {
+      msgtype: "markdown",
+      markdown: { content: "late answer" },
+    });
+  });
+
   it("deduplicates repeated callback message ids", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");
@@ -181,6 +260,29 @@ describe("WecomIM routing and ownership", () => {
     expect(im.getStatus()).toEqual({
       kind: "error",
       reason: "invalid credentials",
+    });
+  });
+
+  it("preserves the concrete authentication failure after retries are exhausted", async () => {
+    const { host } = createHost();
+    const client = new FakeClient();
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    client.emit(
+      "error",
+      new Error("Authentication failed: invalid secret (code: 40001)"),
+    );
+    client.emit(
+      "error",
+      Object.assign(new Error("Max auth failure attempts exceeded (3)"), {
+        code: "WS_AUTH_FAILURE_EXHAUSTED",
+      }),
+    );
+
+    expect(im.getStatus()).toEqual({
+      kind: "error",
+      reason: "企业微信鉴权失败：invalid secret (code: 40001)",
     });
   });
 

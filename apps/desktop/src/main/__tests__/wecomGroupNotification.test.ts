@@ -29,16 +29,21 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function createSecrets(initial: string | null = null) {
-  let value = initial;
+const WEBHOOK_SECRET_NAME = 'wecom-group-webhook-url';
+const ENABLED_SETTING_NAME = 'wecom-group-notification-enabled';
+
+function createSecrets(initialUrl: string | null = null, initialEnabled: string | null = null) {
+  const values = new Map<string, string>();
+  if (initialUrl !== null) values.set(WEBHOOK_SECRET_NAME, initialUrl);
+  if (initialEnabled !== null) values.set(ENABLED_SETTING_NAME, initialEnabled);
   return {
-    read: vi.fn(() => value),
-    write: vi.fn((_name: string, next: string) => {
-      value = next;
+    read: vi.fn((name: string) => values.get(name) ?? null),
+    write: vi.fn((name: string, next: string) => {
+      values.set(name, next);
       return true;
     }),
-    remove: vi.fn(() => {
-      value = null;
+    remove: vi.fn((name: string) => {
+      values.delete(name);
     }),
   };
 }
@@ -70,21 +75,67 @@ describe('WeCom group notification security boundary', () => {
   });
 
   it('tests before persisting and never exposes the stored URL', async () => {
-    const fetchImpl = vi.fn(async () => response({ errcode: 0, errmsg: 'ok' }));
+    let sentBody = '';
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      sentBody = String(init.body);
+      return response({ errcode: 0, errmsg: 'ok' });
+    });
     const secrets = createSecrets();
     const service = new WecomGroupNotificationService(fetchImpl, secrets);
 
     const state = await service.saveAndTest(
       'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh',
+      'Localized test message',
     );
 
     expect(fetchImpl).toHaveBeenCalledWith(
       'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh',
       expect.objectContaining({ method: 'POST', redirect: 'manual' }),
     );
-    expect(secrets.write).toHaveBeenCalledOnce();
-    expect(state).toEqual({ configured: true, maskedKey: '••••efgh' });
+    expect(secrets.write).toHaveBeenCalledTimes(2);
+    expect(secrets.write).toHaveBeenNthCalledWith(1, WEBHOOK_SECRET_NAME, expect.any(String));
+    expect(secrets.write).toHaveBeenNthCalledWith(2, ENABLED_SETTING_NAME, 'true');
+    expect(state).toEqual({ configured: true, enabled: true, maskedKey: '••••efgh' });
     expect(JSON.stringify(service.getState())).not.toContain('abcdefgh');
+    expect(sentBody).toContain('Localized test message');
+  });
+
+  it('keeps existing webhook configurations enabled until the user turns them off', () => {
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const service = new WecomGroupNotificationService(vi.fn(), createSecrets(url));
+
+    expect(service.getState()).toEqual({
+      configured: true,
+      enabled: true,
+      maskedKey: '••••efgh',
+    });
+  });
+
+  it('uses the persisted master switch to gate automation publishes', async () => {
+    const fetchImpl = vi.fn(async () => response({ errcode: 0, errmsg: 'ok' }));
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const secrets = createSecrets(url);
+    const service = new WecomGroupNotificationService(fetchImpl, secrets);
+
+    expect(service.setEnabled(false).enabled).toBe(false);
+    await expect(service.publishMarkdown('automation result')).rejects.toThrow(
+      'WECOM_GROUP_NOTIFICATIONS_DISABLED',
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    expect(service.setEnabled(true).enabled).toBe(true);
+    await service.publishMarkdown('automation result');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('allows an explicit test while the automation master switch is off', async () => {
+    const fetchImpl = vi.fn(async () => response({ errcode: 0, errmsg: 'ok' }));
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const service = new WecomGroupNotificationService(fetchImpl, createSecrets(url, 'false'));
+
+    await service.test('Localized test message');
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it('does not persist a webhook when the test call fails', async () => {
@@ -93,7 +144,10 @@ describe('WeCom group notification security boundary', () => {
     const service = new WecomGroupNotificationService(fetchImpl, secrets);
 
     await expect(
-      service.saveAndTest('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh'),
+      service.saveAndTest(
+        'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh',
+        'Localized test message',
+      ),
     ).rejects.toThrow('WECOM_GROUP_SEND_FAILED:93000');
     expect(secrets.write).not.toHaveBeenCalled();
   });
@@ -112,6 +166,7 @@ describe('WeCom group notification security boundary', () => {
 
     const saving = service.saveAndTest(
       'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh',
+      'Localized test message',
       () => current,
     );
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
@@ -133,7 +188,9 @@ describe('WeCom group notification security boundary', () => {
     const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
     const service = new WecomGroupNotificationService(fetchImpl, createSecrets(url));
 
-    await expect(service.test()).rejects.toThrow('WECOM_GROUP_REDIRECT_REJECTED');
+    await expect(service.test('Localized test message')).rejects.toThrow(
+      'WECOM_GROUP_REDIRECT_REJECTED',
+    );
   });
 
   it('serializes concurrent publishes to preserve message order', async () => {
@@ -157,5 +214,15 @@ describe('WeCom group notification security boundary', () => {
 
     expect(bodies[0]).toContain('first');
     expect(bodies[1]).toContain('second');
+  });
+
+  it('clears both the webhook and its master switch', () => {
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const secrets = createSecrets(url, 'true');
+    const service = new WecomGroupNotificationService(vi.fn(), secrets);
+
+    expect(service.clear()).toEqual({ configured: false, enabled: false });
+    expect(secrets.remove).toHaveBeenCalledWith(WEBHOOK_SECRET_NAME);
+    expect(secrets.remove).toHaveBeenCalledWith(ENABLED_SETTING_NAME);
   });
 });

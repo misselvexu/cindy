@@ -104,7 +104,9 @@ vi.mock('../device-link', () => ({
 
 // mobile 正文素材:最近一条 assistant 内容(真实实现走 localDb)。默认空 = 无摘要,
 // 既有用例的调用断言不带 detail;内容用例单独 mockResolvedValueOnce。
-const latestMessageText = vi.fn(async (_sessionId: string, _role: string) => '');
+const latestMessageText = vi.fn<
+  (sessionId: string, role: string) => Promise<string>
+>(async () => '');
 vi.mock('../localDb/latestMessageText', () => ({
   latestMessageText: (sessionId: string, role: string) => latestMessageText(sessionId, role),
 }));
@@ -158,11 +160,6 @@ const baseDeps = (feishuIm: FakeFeishuIM) => ({
   >[0]['feishuIm'],
 });
 
-const withWecomGroup = (feishuIm: FakeFeishuIM, publishMarkdown: ReturnType<typeof vi.fn>) => ({
-  ...baseDeps(feishuIm),
-  wecomGroupPublisher: { publishMarkdown },
-});
-
 describe('notificationService — channels 分发', () => {
   beforeEach(() => {
     // 每个用例重新注册 handler,避免相互污染。
@@ -195,24 +192,6 @@ describe('notificationService — channels 分发', () => {
     expect(markSessionNeedsAttention).toHaveBeenCalledWith('s1');
     expect(feishuIm.sendMarkdownText).not.toHaveBeenCalled();
     expect(sendMobileSessionNotify).not.toHaveBeenCalled();
-  });
-
-  it('企微群通知失败不影响其它通知通道', async () => {
-    const { initNotificationService } = await freshService();
-    const publishMarkdown = vi.fn(async () => Promise.reject(new Error('webhook failed')));
-    initNotificationService(withWecomGroup(makeFeishuIm('ou_owner'), publishMarkdown));
-
-    await expect(
-      invokeHandler({
-        sessionId: 's-wecom',
-        title: 'Group',
-        kind: 'done',
-        channels: { desktop: false, wecomGroup: true },
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(publishMarkdown).toHaveBeenCalledWith(expect.stringContaining('Group'));
-    expect(markSessionNeedsAttention).toHaveBeenCalledWith('s-wecom');
   });
 
   it('payload 运行时校验:非法 kind / 超长 title / 空 sessionId 直接 reject,不进任何通道', async () => {

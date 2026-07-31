@@ -62,6 +62,7 @@ export function useWecomBot() {
         setStatus(next.status);
         setBotId(next.botId);
         setOwnerUserId(next.ownerUserId);
+        if (next.status.kind === 'connected') setSecret('');
       }),
     [],
   );
@@ -90,7 +91,7 @@ export function useWecomBot() {
       setStatus(next.status);
       setBotId(next.botId);
       setOwnerUserId(next.ownerUserId);
-      setSecret('');
+      if (next.status.kind === 'connected') setSecret('');
       if (result.saveErrorStatus?.kind === 'error' || result.status.kind === 'error') {
         toast.error(t('settings.wecomBot.connectFailed'));
         return false;
@@ -176,8 +177,20 @@ export function useWecomBot() {
     validationError,
     isSaving,
     isDisconnecting,
-    canConnect: Boolean(botId.trim() && secret.trim() && !isSaving && !isDisconnecting),
-    canReconnect: Boolean(botId.trim() && !secret.trim() && !isSaving && !isDisconnecting),
+    canConnect: Boolean(
+      botId.trim() &&
+        secret.trim() &&
+        status.kind !== 'connecting' &&
+        !isSaving &&
+        !isDisconnecting,
+    ),
+    canReconnect: Boolean(
+      botId.trim() &&
+        !secret.trim() &&
+        status.kind !== 'connecting' &&
+        !isSaving &&
+        !isDisconnecting,
+    ),
     connect,
     reconnect,
     disconnect,

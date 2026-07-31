@@ -25,7 +25,7 @@ import type {
   PermissionMode,
   TurnPermissionPolicy,
 } from '@cindy/maker-core';
-import type { ChannelIM, ImOutputDriver, IMMessageEvent, IMUnsupportedEntry } from '@cindy/im';
+import type { ImOutputDriver, IMMessageEvent, IMUnsupportedEntry, TextChannelIM } from '@cindy/im';
 
 /** 渠道名 — 同时是 sessions.source 列值与 IdentityKey.channel 的值域。 */
 export type ImChannelName =
@@ -99,8 +99,8 @@ export interface ImSessionNamespace {
  */
 export interface ImChannelAdapter {
   channel: ImChannelName;
-  /** 收发能力(@cindy/im ChannelIM 契约)。 */
-  im: ChannelIM;
+  /** 所有渠道共有的文本收发能力；富卡片能力由 output.kind 显式收窄。 */
+  im: TextChannelIM;
   /** Terminal output strategy; existing channels use rich-card. */
   output: ImOutputDriver;
   config: ImOrchestratorConfig;

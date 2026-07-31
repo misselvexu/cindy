@@ -4,19 +4,17 @@ import type { ImUiTextPack } from '../shared/types';
 
 export const ui = {
   slash: {
-    new: '🌱 新会话已开始，之前的上下文已清空。',
+    new: '🌱 新对话已开始，之前的上下文已清空。',
     help: `🤖 可用命令：
 
-/new         开始新会话
-/model       切换模型
-/permission  调整权限模式
-/ctr         接管 desktop 会话
-/exctr       结束接管，回到企业微信会话
+/new         开始新对话
+/stop        中止当前任务
+/exctr       结束已有接管
 /help        查看帮助
 
 任务运行中可发送 \`!stop\` 中止当前任务并清空排队消息。`,
     unknownCommand: (cmd: string) =>
-      `未识别命令 \`${cmd}\`。可用命令：/new、/model、/permission、/ctr、/exctr、/help`,
+      `未识别命令 \`${cmd}\`。可用命令：/new、/stop、/exctr、/help`,
     detachedBySlash: '🚪 已结束接管，后续消息回到企业微信会话。',
     detachedByRevoke: '⚠️ desktop 端已收回接管，后续消息回到企业微信会话。',
     notAttached: '当前没有正在接管的会话。',

@@ -368,7 +368,8 @@ export function ScheduleFormDialog({
   }, [selectedTemplate, paramValues, promptDirty, setField]);
 
   const feishuBotReady = useFeishuBot().status === 'connected';
-  const wecomGroupReady = useWecomGroupNotificationSettings().configured;
+  const wecomGroupSettings = useWecomGroupNotificationSettings();
+  const wecomGroupReady = wecomGroupSettings.configured && wecomGroupSettings.enabled;
   const navigate = useNavigate();
   const openReferencedSession = useCallback(
     async (sessionId: string) => {

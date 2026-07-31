@@ -2514,18 +2514,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sessionId: string;
     title: string;
     kind: 'done' | 'error' | 'needs-reply';
-    channels?: { desktop?: boolean; feishu?: boolean; wecomGroup?: boolean; mobile?: boolean };
+    channels?: { desktop?: boolean; feishu?: boolean; mobile?: boolean };
   }): Promise<void> =>
     ipcRenderer.invoke('notification:show-session-event', payload),
   notificationSetDesktopEnabled: (enabled: boolean): Promise<{ ok: true }> =>
     ipcRenderer.invoke('notification:set-desktop-enabled', enabled),
   wecomGroupNotification: {
-    getState: (): Promise<{ configured: boolean; maskedKey?: string }> =>
+    getState: (): Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }> =>
       ipcRenderer.invoke('wecomGroupNotification:get-state'),
-    saveAndTest: (webhookUrl: string): Promise<{ configured: boolean; maskedKey?: string }> =>
-      ipcRenderer.invoke('wecomGroupNotification:save-and-test', webhookUrl),
-    test: (): Promise<{ ok: true }> => ipcRenderer.invoke('wecomGroupNotification:test'),
-    clear: (): Promise<{ configured: boolean }> =>
+    saveAndTest: (
+      webhookUrl: string,
+      testMessage: string,
+    ): Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }> =>
+      ipcRenderer.invoke('wecomGroupNotification:save-and-test', webhookUrl, testMessage),
+    test: (testMessage: string): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('wecomGroupNotification:test', testMessage),
+    setEnabled: (
+      enabled: boolean,
+    ): Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }> =>
+      ipcRenderer.invoke('wecomGroupNotification:set-enabled', enabled),
+    clear: (): Promise<{ configured: boolean; enabled: boolean }> =>
       ipcRenderer.invoke('wecomGroupNotification:clear'),
   },
   notificationMarkSessionAttention: (sessionId: string): Promise<void> =>

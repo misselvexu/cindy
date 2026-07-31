@@ -44,7 +44,7 @@ vi.mock('../controlState', () => ({
   enterControl: vi.fn(),
 }));
 
-import type { ChannelIM } from '@cindy/im';
+import type { ChannelIM, TextChannelIM } from '@cindy/im';
 
 import { ui } from '../../feishu/uiText';
 import { createSlashHandlers } from '../slashCommands';
@@ -274,6 +274,40 @@ describe('IM slash commands', () => {
     expect(mocks.sendMarkdownText).toHaveBeenCalledWith(
       'ou_user',
       ui.slash.unknownCommand('/start'),
+    );
+  });
+
+  it('treats rich-card commands as unsupported on a text-only channel', async () => {
+    const textIm = {
+      sendMarkdownText: mocks.sendMarkdownText,
+    } as unknown as TextChannelIM;
+    const turnRunner = makeTurnRunner();
+    const { handlers } = makeHarness({
+      turnRunner,
+      adapterOverrides: {
+        channel: 'wecom',
+        im: textIm,
+        output: {
+          kind: 'chunked-text',
+          im: textIm,
+          commitFinal: vi.fn(),
+        },
+      },
+    });
+
+    for (const command of ['/model', '/ctr', '/session', '/permission']) {
+      await handlers.handleSlashCommand(command, {
+        botContextId: 'bot',
+        userId: 'owner',
+      });
+    }
+
+    expect(mocks.sendInteractiveCard).not.toHaveBeenCalled();
+    expect(turnRunner.resolveRouteTarget).not.toHaveBeenCalled();
+    expect(mocks.sendMarkdownText.mock.calls.map(([, text]) => text)).toEqual(
+      ['/model', '/ctr', '/session', '/permission'].map((command) =>
+        ui.slash.unknownCommand(command),
+      ),
     );
   });
 

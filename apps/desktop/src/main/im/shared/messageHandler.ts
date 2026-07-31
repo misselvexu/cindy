@@ -16,7 +16,7 @@
  * 跨渠道互不影响。
  */
 
-import type { ChannelIM, IMMessageEvent } from '@cindy/im';
+import type { IMMessageEvent, TextChannelIM } from '@cindy/im';
 
 import { createLogger } from '../../logger';
 import {
@@ -46,7 +46,7 @@ export function createMessageHandler(
   adapter: ImChannelAdapter,
   slash: ImSlashHandlers,
   turnRunner: ImTurnRunner,
-): (im: ChannelIM) => () => void {
+): (im: TextChannelIM) => () => void {
   const { ui, channel, threadScoped } = adapter;
   const log = createLogger(`im:${channel}:msg`);
 
@@ -54,7 +54,7 @@ export function createMessageHandler(
   const userLocks = new Map<string, Promise<void>>();
 
   async function processOne(
-    im: ChannelIM,
+    im: TextChannelIM,
     event: IMMessageEvent,
     accountGeneration: ImAccountGeneration,
   ): Promise<void> {
@@ -223,7 +223,7 @@ export function createMessageHandler(
     }
   }
 
-  return function attachMessageHandler(im: ChannelIM): () => void {
+  return function attachMessageHandler(im: TextChannelIM): () => void {
     return im.onMessage((event) => {
       // Capture synchronously, before entering the per-user queue. A boolean
       // check at execution time could accept old-account work after relogin.
