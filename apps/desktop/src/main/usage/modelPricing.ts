@@ -188,24 +188,55 @@ function validateCatalog(value: unknown): ModelPricingCatalog | null {
   return entries.length === 0 ? {} : null;
 }
 
+/** 读回同 scope 的磁盘快照(仅供写入前的报价保护使用;校验与 hydrate 同口径)。 */
+async function readValidDiskPayload(
+  scope: string,
+): Promise<{ pricing: ModelPricingCatalog; fetchedAt: number } | null> {
+  try {
+    const raw = JSON.parse(await fs.readFile(diskCachePath(), 'utf8')) as Partial<DiskCachePayload>;
+    if (raw.version !== DISK_CACHE_VERSION || raw.scope !== scope) return null;
+    if (!Number.isFinite(raw.fetchedAt) || Number(raw.fetchedAt) <= 0) return null;
+    const pricing = validateCatalog(raw.pricing);
+    if (!pricing?.xd) return null;
+    return { pricing, fetchedAt: Number(raw.fetchedAt) };
+  } catch {
+    return null;
+  }
+}
+
 async function writeDiskCache(
   scope: string,
   pricing: ModelPricingCatalog,
   accountCurrency: MoneyCurrency | null,
   fetchedAt: number,
+  /**
+   * 本次的报价不足以取代磁盘上那份 —— 无价故障轮(空报价)与 retained 轮
+   * (approximate quote 过不了 validateQuote)都属于这种。此时保留磁盘既有报价
+   * **连同它的 fetchedAt**(报价没变,年龄基准不能前移),但 accountCurrency 照常
+   * 更新:账本币种要能随快照恢复,而这个事实与有没有报价无关。
+   */
+  preserveDiskQuotes = false,
 ): Promise<void> {
   try {
     const file = diskCachePath();
+    let effectivePricing = pricing;
+    let effectiveFetchedAt = fetchedAt;
+    if (preserveDiskQuotes) {
+      const existing = await readValidDiskPayload(scope);
+      if (existing) {
+        effectivePricing = existing.pricing;
+        effectiveFetchedAt = existing.fetchedAt;
+      }
+    }
     await fs.mkdir(path.dirname(file), { recursive: true });
     const payload: DiskCachePayload = {
       version: DISK_CACHE_VERSION,
       scope,
-      fetchedAt,
-      pricing,
+      fetchedAt: effectiveFetchedAt,
+      pricing: effectivePricing,
       accountCurrency,
     };
     await fs.writeFile(file, JSON.stringify(payload), 'utf8');
-    hydratedScopes.add(scope);
   } catch (err) {
     log.debug(
       'write model pricing cache failed:',
@@ -415,13 +446,26 @@ export function replaceGatewayModelPricing(
   // 账本写入层据此判断"这一笔是不是本账号的结算币种"。目录为空(登出 / clear)或混合
   // 币种时 resolveGatewayAccountCurrency 返回 null，账本随之回落构建默认值。
   setActiveLedgerCurrency(gatewayAccountCurrency);
-  hydratedScopes.add(scope);
-  // retained 轮不写盘(见 retainKnownGatewayQuotes (c)):approximate quote 过不了
-  // validateQuote,写进去会让下次冷启动整份判无效;跳过则磁盘上留着最后一份精确快照,
-  // 重启后 hydrate 正好恢复它。
-  if (!retainedFromLastSnapshot) {
-    void writeDiskCache(scope, pricing, gatewayAccountCurrency, cacheAt);
-  }
+  // 「目录非空、产不出报价、且一个价格字段都没下发」= 无价故障态。判据与
+  // retainKnownGatewayQuotes (a-2) 同源:显式全 0 的免费目录**下发了**价格,它是有效
+  // 快照(重启后就该 hydrate 成"没有报价"),不能混进故障态;models 为空(登出 / clear)
+  // 同理照常落盘。
+  const isUnpricedFailure =
+    models.length > 0 && !fetched.xd && !models.some(declaresGatewayTokenPrice);
+  // 故障轮不标 hydrated:冷启动时 /models 可能早于 prewarm 返回无价目录,此时 cacheScope
+  // 还没指向本账号 → retained 必然拿不到旧报价。若在这里标成已 hydrate,迟到的 prewarm
+  // 会被 getModelPricing / hydrateFromDisk 的短路挡住,永远读不回磁盘上那份精确快照
+  // —— 恰好在本次线上无价故障场景下,重启反而彻底失去最后已知报价。
+  if (!isUnpricedFailure) hydratedScopes.add(scope);
+  // 写盘照常发生(accountCurrency 要能随快照恢复,与有没有报价无关),但故障轮与
+  // retained 轮不得用自己的报价取代磁盘上那份 —— 由 preserveDiskQuotes 兜住。
+  void writeDiskCache(
+    scope,
+    pricing,
+    gatewayAccountCurrency,
+    cacheAt,
+    isUnpricedFailure || retainedFromLastSnapshot,
+  );
   broadcastPricing(pricing);
   return pricing;
 }
@@ -448,7 +492,12 @@ export function isModelPricingRefreshInFlight(): boolean {
 
 export async function getModelPricing(): Promise<ModelPricingCatalog | null> {
   const scope = currentScope();
-  if (cacheScope === scope) return cache;
+  // 内存里已有报价、或已确认过磁盘(含确认为空)→ 直接用内存态。
+  // 但「内存是空报价且从未读过盘」必须去读一次:冷启动时 /models 可能早于
+  // prewarm 返回一份**无价**目录,那一轮把 cache 置成 {} 却没有任何磁盘依据;
+  // 若在此直接短路,磁盘上最后一份精确快照就再也读不回来了(见
+  // replaceGatewayModelPricing 里 isUnpricedFailure 的处理)。
+  if (cacheScope === scope && (cache?.xd || hydratedScopes.has(scope))) return cache;
   return hydrateFromDisk(scope);
 }
 

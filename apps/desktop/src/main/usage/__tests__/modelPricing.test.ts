@@ -403,6 +403,41 @@ describe('gateway model pricing projection', () => {
     expect(replaceGatewayModelPricing([{ id: 'aging' }])).toEqual({});
   });
 
+  it('lets a late hydrate recover the disk snapshot after an unpriced cold-start sync', async () => {
+    // 先造出磁盘上的精确快照。
+    replaceGatewayModelPricing([
+      {
+        id: 'cold-start',
+        inputCostPerToken: 0.000003,
+        outputCostPerToken: 0.000015,
+      },
+    ]);
+    await vi.waitFor(async () => {
+      const raw = JSON.parse(await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'));
+      expect(raw.pricing.xd['cold-start'].approximate).toBe(false);
+    });
+
+    // 冷启动:内存全空(prewarm 还没跑),/models 先返回一份无价目录。
+    // 此时 cacheScope 尚未指向本账号 → retained 必然拿不到旧报价。
+    __resetModelPricingCacheForTesting();
+    expect(replaceGatewayModelPricing([{ id: 'cold-start' }])).toEqual({});
+
+    // 这一轮绝不能覆盖磁盘上的精确快照。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const onDisk = JSON.parse(
+      await readFile(userDataPath('cache', 'model-pricing.json'), 'utf8'),
+    );
+    expect(onDisk.pricing.xd['cold-start'].approximate).toBe(false);
+
+    // 也不能把该 scope 标成已 hydrate —— 否则迟到的 prewarm 会被短路挡住,
+    // 永远读不回磁盘上最后一份精确报价。
+    const hydrated = await getModelPricing();
+    expect(hydrated?.xd?.['cold-start']).toMatchObject({
+      approximate: false,
+      inputPerMtok: 3,
+    });
+  });
+
   it('leaves the last precise disk snapshot intact on retained rounds', async () => {
     replaceGatewayModelPricing([
       {
